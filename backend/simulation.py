@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, asdict
 from datetime import datetime
 
+from hyperliquid_client import HyperliquidClient
 from strategy_taxonomy import normalize_strategy
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -47,6 +51,7 @@ class SimulationEngine:
 
     def __init__(self, db, config: dict):
         self.db = db
+        self.config = config
         sim_cfg = config.get("simulation", {})
         self.enabled = bool(sim_cfg.get("enabled", True))
         self.exit_cfg = sim_cfg.get("exit_rules", {})
@@ -78,6 +83,11 @@ class SimulationEngine:
             if str(name).strip()
         ]
         self.default_slippage_bps = float(wallet_cfg.get("slippage_bps", 8.0))
+        hl_symbols = config.get("hyperliquid", {}).get("symbols") or ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+        self.hyperliquid_client = HyperliquidClient(symbols=hl_symbols)
+        self.funding_interval_seconds = 8 * 3600
+        self._last_funding_cycle_at: dict[str, str] = {}
+        self._funding_pnl_by_pair: dict[str, float] = {}
 
         self.positions: list[SimPosition] = []
         self.pair_positions: list[SimPairPosition] = []
@@ -225,6 +235,7 @@ class SimulationEngine:
             rows.append(
                 {
                     "trade_type": "single",
+                    "venue": "hyperliquid",
                     "symbol": position.symbol,
                     "strategy": position.strategy,
                     "direction": int(position.direction),
@@ -266,7 +277,9 @@ class SimulationEngine:
                 opened_at = datetime.fromisoformat(position.entry_ts)
                 elapsed_hours = max(0.0, (now - opened_at).total_seconds() / 3600.0)
                 funding_carry = -int(position.direction) * avg_funding_spread * elapsed_hours * float(position.stake_usdc)
-                unrealized_pnl = spread_pnl + funding_carry
+                pair_key = f"{position.symbol}:{position.strategy}:{position.entry_ts}"
+                funding_pnl = float(self._funding_pnl_by_pair.get(pair_key) or 0.0)
+                unrealized_pnl = spread_pnl + funding_carry + funding_pnl
 
             opened_at = datetime.fromisoformat(position.entry_ts)
             duration_seconds = max(0, int((now - opened_at).total_seconds()))
@@ -274,6 +287,7 @@ class SimulationEngine:
             rows.append(
                 {
                     "trade_type": "pair",
+                    "venue": "hyperliquid",
                     "symbol": position.symbol,
                     "strategy": position.strategy,
                     "direction": int(position.direction),
@@ -332,11 +346,41 @@ class SimulationEngine:
 
         stake = available * calibrated_confidence * calibrated_edge * calibrated_risk
         stake = min(stake, self.wallet_max_position, available)
-        if stake < self.wallet_min_notional:
+        if stake <= 0:
             return 0.0, 0.0
+        if stake < self.wallet_min_notional:
+            stake_floor = min(self.wallet_min_notional, self.wallet_max_position, available)
+            if stake_floor <= 0 or available < stake_floor:
+                return 0.0, 0.0
+            logger.info(
+                f"[STAKE_FLOOR] strategy={strategy} "
+                f"computed={stake:.6f} floored_to={stake_floor:.4f}"
+            )
+            stake = stake_floor
         quantity = stake / max(entry_price, 1e-9)
         self.wallets[strategy] = max(0.0, available - stake)
         return stake, quantity
+
+    def _apply_funding(self, position: dict) -> float:
+        """
+        Applies Hyperliquid funding to a simulated perp position.
+        Returns PnL delta from this funding cycle.
+        """
+        assert str(self.config.get("execution_mode", "paper")).strip().lower() == "paper", (
+            "SAFETY: funding accrual only allowed in paper mode."
+        )
+        if position.get("venue") != "hyperliquid":
+            return 0.0
+        symbol = str(position.get("symbol") or "")
+        snapshots = self.hyperliquid_client.get_perp_snapshots()
+        funding_rate = 0.0
+        for snap in snapshots:
+            if str(snap.symbol).upper() == symbol.upper():
+                funding_rate = float(snap.funding_rate or 0.0)
+                break
+        funding_pnl = -1.0 * float(position.get("size") or 0.0) * funding_rate
+        position["unrealized_pnl"] = float(position.get("unrealized_pnl") or 0.0) + funding_pnl
+        return funding_pnl
 
     def apply_slippage(self, price: float, spread_bps: float, side: str) -> float:
         slip = float(price) * (max(0.0, float(spread_bps)) / 10000.0)
@@ -394,7 +438,9 @@ class SimulationEngine:
             float(position.entry_funding_spread) + float(current_funding_spread)
         ) / 2.0
         funding_carry = -int(position.direction) * avg_funding_spread * elapsed_hours * float(position.stake_usdc)
-        pnl = spread_pnl + funding_carry
+        pair_key = f"{position.symbol}:{position.strategy}:{position.entry_ts}"
+        accrued_funding = float(self._funding_pnl_by_pair.get(pair_key) or 0.0)
+        pnl = spread_pnl + funding_carry + accrued_funding
 
         strategy = str(position.strategy or "cross_venue")
         self._ensure_strategy_wallet(strategy)
@@ -434,6 +480,9 @@ class SimulationEngine:
         max_duration_minutes: int | None = None,
         spread_bps: float = 0.0,
     ):
+        assert str(self.config.get("execution_mode", "paper")).strip().lower() == "paper", (
+            "SAFETY: execution_mode must be 'paper'. Refusing to submit trade."
+        )
         if not self.enabled:
             return
         strategy = normalize_strategy(strategy)
@@ -538,11 +587,41 @@ class SimulationEngine:
           +1 → long Binance / short HL
           -1 → short Binance / long HL
         """
+        assert str(self.config.get("execution_mode", "paper")).strip().lower() == "paper", (
+            "SAFETY: execution_mode must be 'paper'. Refusing to submit trade."
+        )
         if not self.enabled:
             return
         strategy = normalize_strategy(strategy)
         if not binance_price or not hl_price:
             return
+
+        now_dt = datetime.fromisoformat(timestamp)
+        for position in self.pair_positions:
+            if position.symbol != symbol or position.strategy != strategy:
+                continue
+            pair_key = f"{position.symbol}:{position.strategy}:{position.entry_ts}"
+            last_ts_raw = self._last_funding_cycle_at.get(pair_key)
+            if last_ts_raw:
+                last_ts = datetime.fromisoformat(last_ts_raw)
+                elapsed = (now_dt - last_ts).total_seconds()
+            else:
+                elapsed = self.funding_interval_seconds
+            if elapsed < self.funding_interval_seconds:
+                continue
+            funding_position = {
+                "venue": "hyperliquid",
+                "symbol": position.symbol,
+                "size": float(position.stake_usdc),
+                "unrealized_pnl": 0.0,
+            }
+            funding_delta = self._apply_funding(funding_position)
+            self._funding_pnl_by_pair[pair_key] = float(self._funding_pnl_by_pair.get(pair_key) or 0.0) + funding_delta
+            self._last_funding_cycle_at[pair_key] = timestamp
+            logger.info(
+                f"[FUNDING_APPLIED] symbol={position.symbol} strategy={position.strategy} "
+                f"delta={funding_delta:.6f}"
+            )
 
         ref_price = max(float(binance_price), float(hl_price), 1e-9)
         current_spread = (float(binance_price) - float(hl_price)) / ref_price
@@ -573,6 +652,9 @@ class SimulationEngine:
                     current_funding_spread=float(funding_spread),
                     exit_ts=timestamp,
                 )
+                pair_key = f"{position.symbol}:{position.strategy}:{position.entry_ts}"
+                self._last_funding_cycle_at.pop(pair_key, None)
+                self._funding_pnl_by_pair.pop(pair_key, None)
             else:
                 remaining_positions.append(position)
 
@@ -611,6 +693,9 @@ class SimulationEngine:
                         regime=regime,
                     )
                 )
+                pair_key = f"{symbol}:{strategy}:{timestamp}"
+                self._last_funding_cycle_at[pair_key] = timestamp
+                self._funding_pnl_by_pair[pair_key] = 0.0
 
         self._save_wallets()
         self._save_pair_positions()

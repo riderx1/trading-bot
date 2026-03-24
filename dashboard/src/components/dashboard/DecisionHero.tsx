@@ -6,13 +6,14 @@ import type { DirectionalDecision, Signal } from "@/lib/api";
 interface Props {
   decision: DirectionalDecision | null;
   latestSignal: Signal | null;
+  consensusBlockedCount?: number;
   explainability?: {
     why_long: string[];
     why_not_stronger: string[];
   } | null;
 }
 
-export function DecisionHero({ decision, latestSignal, explainability }: Props) {
+export function DecisionHero({ decision, latestSignal, consensusBlockedCount, explainability }: Props) {
   const [showDetails, setShowDetails] = useState(false);
   const direction = decision?.bias === "LONG" ? 1 : decision?.bias === "SHORT" ? -1 : 0;
   const confidence = decision?.confidence ?? 0;
@@ -115,6 +116,9 @@ export function DecisionHero({ decision, latestSignal, explainability }: Props) 
           <PrimaryMetric label="Position Size" value={positionSize} />
           <PrimaryMetric label="Horizon" value={horizon} />
         </div>
+        <p className="mt-3 font-mono text-xs text-muted-foreground">
+          Blocked signals: {Number(consensusBlockedCount ?? 0)}
+        </p>
 
         {showDetails ? (
           <div className="mt-5 grid gap-3 rounded-xl border border-border bg-secondary/25 p-4 md:grid-cols-2">

@@ -6,6 +6,7 @@ Paper mode is the only supported execution path in this project.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from execution_model import evaluate_execution
 
@@ -37,15 +38,36 @@ class ExecutionClient:
     def execute_binary_market_order(self, request: ExecutionRequest, market: dict) -> ExecutionResult:
         raise NotImplementedError()
 
+    def submit(self, trade_intent: dict[str, Any], market: dict) -> ExecutionResult:
+        raise NotImplementedError()
+
 
 class PaperExecutionClient(ExecutionClient):
     mode = "paper"
+    venue = "paper"
+    instrument = "unknown"
 
     def __init__(self, db, trading_cfg: dict):
         self.db = db
         self.trading_cfg = trading_cfg
 
+    def _request_from_trade_intent(self, trade_intent: dict[str, Any]) -> ExecutionRequest:
+        return ExecutionRequest(
+            market_row_id=int(trade_intent.get("market_row_id") or 0),
+            market_id=str(trade_intent.get("market_id") or ""),
+            market_name=str(trade_intent.get("market_name") or ""),
+            side=str(trade_intent.get("side") or "YES"),
+            signal_sequence_id=int(trade_intent.get("signal_sequence_id") or 0),
+            trade_key=str(trade_intent.get("trade_key") or ""),
+            quantity=float(trade_intent.get("quantity") or 0.0),
+            notional_usdc=float(trade_intent.get("notional_usdc") or 0.0),
+            reason_code=str(trade_intent.get("reason_code") or "signal_consensus"),
+        )
+
     def execute_binary_market_order(self, request: ExecutionRequest, market: dict) -> ExecutionResult:
+        assert str(self.trading_cfg.get("execution_mode", "paper")).strip().lower() == "paper", (
+            "SAFETY: execution_mode must be 'paper'. Refusing to submit trade."
+        )
         model = evaluate_execution(
             request.side,
             market,
@@ -62,6 +84,7 @@ class PaperExecutionClient(ExecutionClient):
             market_id=request.market_id,
             market_name=request.market_name,
             trade_type=request.side,
+            venue=self.venue,
             price=execution_price,
             quantity=float(request.quantity),
             signal_sequence_id=int(request.signal_sequence_id),
@@ -80,6 +103,37 @@ class PaperExecutionClient(ExecutionClient):
             trade_id=trade_id,
         )
 
+    def submit(self, trade_intent: dict[str, Any], market: dict) -> ExecutionResult:
+        assert str(self.trading_cfg.get("execution_mode", "paper")).strip().lower() == "paper", (
+            "SAFETY: execution_mode must be 'paper'. Refusing to submit trade."
+        )
+        request = self._request_from_trade_intent(trade_intent)
+        return self.execute_binary_market_order(request=request, market=market)
+
+
+class PolymarketPaperClient(PaperExecutionClient):
+    venue = "polymarket"
+    instrument = "prediction_market"
+
+    def submit(self, trade_intent: dict[str, Any], market: dict) -> ExecutionResult:
+        assert str(self.trading_cfg.get("execution_mode", "paper")).strip().lower() == "paper", (
+            "SAFETY: execution_mode must be 'paper'. Refusing to submit trade."
+        )
+        assert trade_intent.get("venue") == "polymarket"
+        return super().submit(trade_intent=trade_intent, market=market)
+
+
+class HyperliquidPaperClient(PaperExecutionClient):
+    venue = "hyperliquid"
+    instrument = "perp"
+
+    def submit(self, trade_intent: dict[str, Any], market: dict) -> ExecutionResult:
+        assert str(self.trading_cfg.get("execution_mode", "paper")).strip().lower() == "paper", (
+            "SAFETY: execution_mode must be 'paper'. Refusing to submit trade."
+        )
+        assert trade_intent.get("venue") == "hyperliquid"
+        return super().submit(trade_intent=trade_intent, market=market)
+
 
 def build_execution_client(mode: str, db, trading_cfg: dict) -> ExecutionClient:
     normalized = (mode or "paper").strip().lower()
@@ -87,4 +141,18 @@ def build_execution_client(mode: str, db, trading_cfg: dict) -> ExecutionClient:
         raise ValueError(
             f"Unsupported execution mode '{mode}'. Only 'paper' mode is allowed."
         )
-    return PaperExecutionClient(db=db, trading_cfg=trading_cfg)
+    return PolymarketPaperClient(db=db, trading_cfg=trading_cfg)
+
+
+def build_paper_execution_clients(mode: str, db, trading_cfg: dict) -> tuple[PolymarketPaperClient, HyperliquidPaperClient]:
+    normalized = (mode or "paper").strip().lower()
+    if normalized != "paper":
+        raise ValueError(
+            f"Unsupported execution mode '{mode}'. Only 'paper' mode is allowed."
+        )
+    cfg = dict(trading_cfg)
+    cfg["execution_mode"] = "paper"
+    return (
+        PolymarketPaperClient(db=db, trading_cfg=cfg),
+        HyperliquidPaperClient(db=db, trading_cfg=cfg),
+    )

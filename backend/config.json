@@ -1,5 +1,6 @@
 {
   "_comment": "Trading Bot Configuration — replace placeholder values before running.",
+  "execution_mode": "paper",
 
   "polymarket": {
     "api_key": "YOUR_POLYMARKET_API_KEY",
@@ -82,7 +83,7 @@
     "ta_alignment_boost": 0.05,
     "ta_conflict_penalty": 0.08,
     "confidence_cap": 0.75,
-    "confidence_density_threshold": 12.0,
+    "confidence_density_threshold": 500.0,
     "confidence_density_window_minutes": 30,
     "low_sample_threshold": 25,
     "low_sample_penalty": 0.12,
@@ -137,9 +138,9 @@
     "paper_wallet": {
       "enabled": true,
       "balance_per_bot_usdc": 10.0,
-      "min_notional_usdc": 1.0,
+      "min_notional_usdc": 0.5,
       "max_position_per_trade_usdc": 3.0,
-      "min_edge_for_position": 0.001,
+      "min_edge_for_position": 0.0005,
       "slippage_bps": 8.0,
       "strategies": ["momentum", "ta_confluence", "reversal", "yes_no", "model_vs_market", "cross_venue", "scalping"]
     },
@@ -148,6 +149,39 @@
       "take_profit_pct": 0.02,
       "stop_loss_pct": 0.01,
       "opposite_signal_exit": true
+    }
+  },
+
+  "paper_wallets": {
+    "polymarket": {
+      "arbitrage": 10.0,
+      "polymarket_scalp": 10.0
+    },
+    "hyperliquid": {
+      "trend": 10.0,
+      "ta": 10.0,
+      "reversal": 10.0,
+      "model": 10.0,
+      "perp_arb": 10.0,
+      "hyperliquid_scalp": 10.0
+    }
+  },
+
+  "risk": {
+    "polymarket": {
+      "max_portfolio_exposure_usdc": 40,
+      "max_per_market_usdc": 10,
+      "min_liquidity_usdc": 1000,
+      "max_spread_bps": 250,
+      "cooldown_seconds": 900
+    },
+    "hyperliquid": {
+      "max_portfolio_exposure_usdc": 60,
+      "max_per_market_usdc": 15,
+      "max_leverage": 3,
+      "min_liquidity_usdc": 5000,
+      "max_spread_bps": 50,
+      "cooldown_seconds": 30
     }
   }
 }

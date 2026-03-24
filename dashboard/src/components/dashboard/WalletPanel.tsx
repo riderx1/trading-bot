@@ -1,20 +1,10 @@
 import { motion } from "framer-motion";
 import { Wallet, RotateCcw } from "lucide-react";
-import type { WalletSnapshot } from "@/lib/api";
+import type { VenueWalletSnapshot } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-
-const STRATEGY_COLORS: Record<string, string> = {
-  momentum: "hsl(142, 60%, 45%)",
-  ta_confluence: "hsl(200, 70%, 50%)",
-  reversal: "hsl(280, 60%, 55%)",
-  yes_no: "hsl(45, 90%, 55%)",
-  model_vs_market: "hsl(280, 60%, 65%)",
-  cross_venue: "hsl(210, 75%, 60%)",
-  scalping: "hsl(18, 90%, 58%)",
-};
 
 const STRATEGY_LABELS: Record<string, string> = {
   momentum: "Momentum",
@@ -27,7 +17,7 @@ const STRATEGY_LABELS: Record<string, string> = {
 };
 
 interface Props {
-  wallets: WalletSnapshot | undefined;
+  wallets: VenueWalletSnapshot | undefined;
 }
 
 export function WalletPanel({ wallets }: Props) {
@@ -49,10 +39,25 @@ export function WalletPanel({ wallets }: Props) {
     }
   };
 
-  const total = wallets?.total_equity_usdc ?? 0;
-  const initial = 40;
+  const total = wallets?.total ?? 0;
+  const initial = 80;
   const pnl = total - initial;
   const pnlPct = initial > 0 ? (pnl / initial) * 100 : 0;
+
+  const entries = [
+    ...Object.entries(wallets?.polymarket ?? {}).map(([strategy, row]) => ({
+      strategy,
+      venue: "polymarket",
+      balance: Number(row.balance ?? 0),
+      pnl: Number(row.pnl ?? 0),
+    })),
+    ...Object.entries(wallets?.hyperliquid ?? {}).map(([strategy, row]) => ({
+      strategy,
+      venue: "hyperliquid",
+      balance: Number(row.balance ?? 0),
+      pnl: Number(row.pnl ?? 0),
+    })),
+  ];
 
   return (
     <div className="rounded-lg border border-border bg-card p-4">
@@ -91,23 +96,20 @@ export function WalletPanel({ wallets }: Props) {
 
       {/* Per-strategy breakdown */}
       <div className="space-y-2">
-        {wallets &&
-          Object.entries(wallets.bots).map(([strategy, wallet]) => {
+        {entries.map(({ strategy, venue, balance, pnl: stratPnl }) => {
             const label = STRATEGY_LABELS[strategy] ?? strategy;
-            const color = STRATEGY_COLORS[strategy] ?? "hsl(215, 12%, 50%)";
-            const stratPnl = wallet.equity_usdc - 10;
 
             return (
               <motion.div
-                key={strategy}
+                key={`${venue}:${strategy}`}
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 className="flex items-center gap-2"
               >
-                <div className="h-2 w-2 rounded-full" style={{ backgroundColor: color }} />
+                <div className={`h-2 w-2 rounded-full ${venue === "polymarket" ? "bg-yellow-400" : "bg-cyan-400"}`} />
                 <span className="flex-1 font-mono text-xs text-muted-foreground">{label}</span>
                 <span className="font-mono text-xs font-medium text-foreground">
-                  ${wallet.equity_usdc.toFixed(2)}
+                  ${balance.toFixed(2)}
                 </span>
                 <span
                   className={`w-14 text-right font-mono text-[10px] ${

@@ -7,6 +7,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Badge } from "@/components/ui/badge";
 import { Activity, Bot, BarChart3, Clock, Wallet, Stethoscope } from "lucide-react";
 import type { TradingSymbol } from "@/contexts/SymbolContext";
 
@@ -66,6 +67,10 @@ export function TopNav() {
 
         {/* Spacer */}
         <div className="flex-1" />
+
+        <Badge variant="secondary" className="mr-2 border border-emerald-500/40 bg-emerald-500/15 font-mono text-[10px] uppercase tracking-wide text-emerald-300">
+          PAPER TRADING ONLY
+        </Badge>
 
         {/* Symbol switcher */}
         <Select value={symbol} onValueChange={(v) => setSymbol(v as TradingSymbol)}>

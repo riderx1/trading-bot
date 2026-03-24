@@ -49,6 +49,17 @@ export interface WalletSnapshot {
   bots: Record<string, BotWallet>;
 }
 
+export interface VenueWalletRow {
+  balance: number;
+  pnl: number;
+}
+
+export interface VenueWalletSnapshot {
+  polymarket: Record<string, VenueWalletRow>;
+  hyperliquid: Record<string, VenueWalletRow>;
+  total: number;
+}
+
 export interface BotDecision {
   bot?: string;
   strategy: string;
@@ -113,6 +124,8 @@ export interface StatusResponse {
   paper_trading_only?: boolean;
   paper_trading: boolean;
   paper_wallets: WalletSnapshot;
+  paper_wallets_by_venue?: VenueWalletSnapshot;
+  consensus_blocked_count?: number;
   symbol: string;
   supported_symbols: string[];
   signal_intervals: string[];
@@ -198,10 +211,12 @@ export interface PerformanceSummary {
   sharpe_ratio: number;
   edge_per_setup: Record<string, number>;
   as_of: string;
+  venue?: string;
 }
 
 export interface StrategyRanking {
   strategy: string;
+  venue?: string;
   trade_count: number;
   win_rate: number;
   avg_pnl: number;
@@ -253,11 +268,14 @@ export interface SimulatedTrade {
   regime?: string | null;
   entry_timestamp?: string | null;
   exit_timestamp?: string | null;
+  venue?: string | null;
+  status?: string | null;
   timestamp: string;
 }
 
 export interface ActivePaperTrade {
   trade_type: "single" | "pair";
+  venue?: string;
   symbol: string;
   strategy: string;
   direction: number;
@@ -413,6 +431,7 @@ function normalizeRankings(raw: any): { strategies: StrategyRanking[] } {
   return {
     strategies: rows.map((row: any) => ({
       strategy: String(row.strategy || "unknown"),
+      venue: String(row.venue || ""),
       trade_count: Number(row.trade_count ?? row.trades ?? 0),
       win_rate: Number(row.win_rate ?? 0),
       avg_pnl: Number(row.avg_pnl ?? 0),
@@ -491,7 +510,7 @@ export const api = {
     ),
 
   getWallets: () =>
-    fetchJson<WalletSnapshot>("/paper-wallets"),
+    fetchJson<VenueWalletSnapshot>("/paper-wallets"),
 
   getPerformance: () =>
     fetchJson<PerformanceSummary>("/performance/summary"),

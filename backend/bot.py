@@ -28,7 +28,7 @@ from typing import Any
 import requests
 
 from db import Database
-from execution_client import ExecutionRequest, build_execution_client
+from execution_client import build_paper_execution_clients
 from hyperliquid_client import HyperliquidClient
 from orchestrator import Orchestrator
 from fair_value_engine import FairValueEngine
@@ -578,11 +578,20 @@ class TradingBot:
             self.paper_trading = True
             trading_cfg["paper_trading"] = True
             logger.warning("paper_trading was disabled in config, forcing paper_trading=true (live trading blocked).")
-        self.execution_mode: str = str(self.config.get("execution", {}).get("mode", "paper")).strip().lower()
+        self.execution_mode: str = str(
+            self.config.get(
+                "execution_mode",
+                self.config.get("execution", {}).get("mode", "paper"),
+            )
+        ).strip().lower()
         if self.execution_mode != "paper":
             raise ValueError(
-                f"Invalid execution.mode='{self.execution_mode}'. Only 'paper' is supported."
+                f"Invalid execution_mode='{self.execution_mode}'. Only 'paper' is supported."
             )
+        self.config["execution_mode"] = "paper"
+        if "execution" not in self.config:
+            self.config["execution"] = {}
+        self.config["execution"]["mode"] = "paper"
         self.mode: str = trading_cfg["mode"]
         self.arb_threshold: float = trading_cfg["arb_threshold"]
         self.signal_threshold: float = trading_cfg["signal_threshold"]
@@ -631,6 +640,9 @@ class TradingBot:
         self.latest_markets: list[dict] = []
         self.latest_signal: dict = {}
         self.latest_signals: dict[str, dict] = {}
+        self._stats: dict[str, int] = {
+            "consensus_blocked_count": 0,
+        }
         self.scanner: Any | None = None
         self.last_signal_sequence_id: int | None = self.db.get_latest_signal_sequence_id()
         self.last_processed_market_timestamp: str | None = self.db.get_bot_state(
@@ -681,9 +693,13 @@ class TradingBot:
         }
         risk_cfg = dict(trading_cfg)
         risk_cfg["execution_mode"] = self.execution_mode
+        risk_cfg["risk"] = self.config.get("risk", {})
         self.risk_engine = RiskEngine(risk_cfg)
         self.simulation = SimulationEngine(self.db, self.config)
-        self.execution_client = build_execution_client(
+        (
+            self.polymarket_execution_client,
+            self.hyperliquid_execution_client,
+        ) = build_paper_execution_clients(
             mode=self.execution_mode,
             db=self.db,
             trading_cfg=self.config["trading"],
@@ -1025,6 +1041,13 @@ class TradingBot:
         trend_1h = signals_by_interval.get("1h", {}).get("trend", "neutral")
         trend_4h = signals_by_interval.get("4h", {}).get("trend", "neutral")
         if trend_1h != "neutral" and trend_4h != "neutral" and trend_1h != trend_4h:
+            self._stats["consensus_blocked_count"] = (
+                self._stats.get("consensus_blocked_count", 0) + 1
+            )
+            logger.info(
+                f"[CONSENSUS_BLOCKED] count={self._stats['consensus_blocked_count']} "
+                "reason=1h_4h_conflict"
+            )
             return (
                 "neutral",
                 max(0.0, confidence - self.conflict_penalty),
@@ -1488,6 +1511,7 @@ class TradingBot:
             edge_bp=result.edge_bp,
             strategy="model_vs_market" if result.arb_type == "model_vs_market" else "yes_no",
             why=result.why,
+            venue="polymarket",
             symbol=active_symbol,
             signal_sequence_id=int(
                 signal_snapshot.get("signal_sequence_id")
@@ -1587,7 +1611,8 @@ class TradingBot:
         )
         confidence = max(0.0, min(self.confidence_cap, confidence * horizon_multiplier))
         confidence = self._apply_strategy_confidence_adjustment(confidence, active_strategy)
-        confidence = self._apply_signal_scarcity(confidence, active_strategy, active_symbol)
+        # REMOVED: duplicate scarcity pass
+        # confidence = self._apply_signal_scarcity(confidence, active_strategy, active_symbol)
 
         min_edge = self._strategy_min_edge(active_strategy)
         if edge <= min_edge:
@@ -1773,6 +1798,9 @@ class TradingBot:
         In live mode:
           - TODO: integrate Polymarket CLOB API order submission here.
         """
+        assert self.execution_mode == "paper", (
+            "SAFETY: execution_mode must be 'paper'. Refusing to submit trade."
+        )
         strategy = normalize_strategy(str(signal_snapshot.get("strategy") or "ta_confluence"))
         signal_strength = str(signal_snapshot.get("signal_strength") or "weak")
         confidence = float(signal_snapshot.get("confidence") or 0.0)
@@ -1807,11 +1835,12 @@ class TradingBot:
         expected_yes = float(expected_stats.get("win_rate") or 0.5)
         expected_side = expected_yes if trade_type == "YES" else (1.0 - expected_yes)
         edge = self._edge_from_context(expected_side, side_market_price)
-        confidence = self._apply_signal_scarcity(
-            confidence,
-            strategy,
-            self._symbol_for_market(market.get("market_name", "")),
-        )
+        # REMOVED: duplicate scarcity pass
+        # confidence = self._apply_signal_scarcity(
+        #     confidence,
+        #     strategy,
+        #     self._symbol_for_market(market.get("market_name", "")),
+        # )
         risk_factor = self._risk_factor_for_setup(signal_strength, confidence)
         trade_notional = self._position_size_usdc(strategy, confidence, edge, risk_factor)
         if trade_notional <= 0:
@@ -1852,6 +1881,11 @@ class TradingBot:
             )
             return
 
+        bot_type = str(signal_snapshot.get("bot_type") or strategy_domain(strategy))
+        is_polymarket_flow = bot_type in ("arbitrage", "polymarket_scalp")
+        venue = "polymarket" if is_polymarket_flow else "hyperliquid"
+        instrument_type = "prediction_market" if venue == "polymarket" else "perp"
+
         cluster = self._cluster_for_market(market_name)
         total_exposure = self.db.get_total_open_exposure_usdc()
         market_exposure = self.db.get_market_open_exposure_usdc(market_id)
@@ -1861,6 +1895,7 @@ class TradingBot:
             market_exposure,
             cluster_exposure,
             trade_notional,
+            venue=venue,
         )
         if not risk_result.allowed:
             self._log(
@@ -1869,18 +1904,32 @@ class TradingBot:
             )
             return
 
-        execution = self.execution_client.execute_binary_market_order(
-            request=ExecutionRequest(
-                market_row_id=market_row_id,
-                market_id=market_id,
-                market_name=market_name,
-                side=trade_type,
-                signal_sequence_id=signal_sequence_id,
-                trade_key=trade_key,
-                quantity=quantity,
-                notional_usdc=trade_notional,
-                reason_code="signal_consensus",
-            ),
+        assert self.config.get("execution_mode") == "paper", (
+            "SAFETY: execution_mode must be 'paper'. Refusing to route trade."
+        )
+        trade_intent = {
+            "market_row_id": market_row_id,
+            "market_id": market_id,
+            "market_name": market_name,
+            "side": trade_type,
+            "signal_sequence_id": signal_sequence_id,
+            "trade_key": trade_key,
+            "quantity": quantity,
+            "notional_usdc": trade_notional,
+            "reason_code": "signal_consensus",
+            "strategy": strategy,
+            "bot_type": bot_type,
+            "venue": venue,
+            "instrument_type": instrument_type,
+        }
+
+        execution_client = (
+            self.polymarket_execution_client
+            if is_polymarket_flow
+            else self.hyperliquid_execution_client
+        )
+        execution = execution_client.submit(
+            trade_intent=trade_intent,
             market=execution_market,
         )
         if not execution.accepted:
@@ -1894,6 +1943,19 @@ class TradingBot:
         self._log(
             f"[PAPER] id={execution.trade_id} {trade_type} | price={exec_price:.4f}"
             f" | qty={quantity:.4f} | value={trade_notional:.2f} USDC"
+        )
+        self.db.insert_simulated_trade_open(
+            symbol=str(market.get("market_id") or market_id),
+            strategy=strategy,
+            direction=1 if trade_type == "YES" else -1,
+            entry_price=exec_price,
+            size=trade_notional,
+            confidence=confidence,
+            edge=edge,
+            source="polymarket_paper",
+            venue=venue,
+            status="open",
+            instrument_type=instrument_type,
         )
 
     # ── Polling threads ─────────────────────────────────────────────────────────
@@ -2058,6 +2120,7 @@ class TradingBot:
                                     p_mkt=None,
                                     edge_bp=int(round(bp)),
                                     strategy="cross_venue",
+                                    venue="hyperliquid",
                                     why=(
                                         f"Binance perp={bin_perp:.2f} HL perp={hl_perp:.2f} "
                                         f"basis={bp:.1f}bp fund_spread={funding_spread:.6f}"

@@ -81,6 +81,16 @@ class Database:
         self._ensure_column(conn, "opportunities", "strategy", "TEXT")
         self._ensure_column(conn, "opportunities", "symbol", "TEXT")
         self._ensure_column(conn, "trades", "reason_code", "TEXT")
+        self._ensure_column(conn, "trades", "venue", "TEXT DEFAULT 'polymarket'")
+        self._ensure_column(conn, "positions", "venue", "TEXT DEFAULT 'polymarket'")
+        self._ensure_column(conn, "trades_simulated", "venue", "TEXT DEFAULT 'polymarket'")
+        self._ensure_column(conn, "trades_simulated", "status", "TEXT DEFAULT 'closed'")
+        self._ensure_column(conn, "trades_simulated", "source", "TEXT")
+        self._ensure_column(conn, "trades_simulated", "size", "REAL")
+        self._ensure_column(conn, "trades_simulated", "confidence", "REAL")
+        self._ensure_column(conn, "trades_simulated", "edge", "REAL")
+        self._ensure_column(conn, "trades_simulated", "instrument_type", "TEXT")
+        self._ensure_column(conn, "arbitrage_opportunities", "venue", "TEXT DEFAULT 'polymarket'")
 
         # Canonical strategy taxonomy migration.
         conn.execute("UPDATE signals SET strategy='momentum' WHERE strategy='momentum_trend'")
@@ -131,6 +141,7 @@ class Database:
             market_id           TEXT NOT NULL,
             market_name         TEXT NOT NULL,
             type                TEXT NOT NULL,
+            venue               TEXT DEFAULT 'polymarket',
             price               REAL NOT NULL,
             quantity            REAL NOT NULL,
             notional            REAL NOT NULL,
@@ -144,6 +155,7 @@ class Database:
             market_id   TEXT NOT NULL,
             market_name TEXT NOT NULL,
             side        TEXT NOT NULL,
+            venue       TEXT DEFAULT 'polymarket',
             quantity    REAL NOT NULL,
             avg_entry   REAL NOT NULL,
             status      TEXT NOT NULL DEFAULT 'open',
@@ -215,11 +227,27 @@ class Database:
             pnl                 REAL NOT NULL,
             duration_seconds    INTEGER NOT NULL,
             duration            INTEGER,
+            venue               TEXT DEFAULT 'polymarket',
+            status              TEXT DEFAULT 'closed',
+            source              TEXT,
+            size                REAL,
+            confidence          REAL,
+            edge                REAL,
+            instrument_type     TEXT,
             signal_strength     TEXT,
             regime              TEXT,
             timeframe           TEXT,
             entry_timestamp     TEXT,
             exit_timestamp      TEXT,
+            timestamp           TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS pair_positions (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol              TEXT NOT NULL,
+            strategy            TEXT NOT NULL,
+            venue               TEXT DEFAULT 'hyperliquid',
+            status              TEXT DEFAULT 'open',
             timestamp           TEXT NOT NULL
         );
 
@@ -273,6 +301,7 @@ class Database:
             realized_pnl        REAL,
             status              TEXT NOT NULL DEFAULT 'open',
             why                 TEXT,
+            venue               TEXT DEFAULT 'polymarket',
             symbol              TEXT,
             signal_sequence_id  INTEGER,
             timestamp           TEXT NOT NULL
@@ -367,6 +396,7 @@ class Database:
         market_id: str,
         market_name: str,
         side: str,
+        venue: str,
         price: float,
         quantity: float,
     ):
@@ -377,8 +407,8 @@ class Database:
         ).fetchone()
         if row is None:
             conn.execute(
-                "INSERT INTO positions (market_id, market_name, side, quantity, avg_entry, status, opened_at, updated_at) VALUES (?, ?, ?, ?, ?, 'open', ?, ?)",
-                (market_id, market_name, side, quantity, price, now, now),
+                "INSERT INTO positions (market_id, market_name, side, venue, quantity, avg_entry, status, opened_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)",
+                (market_id, market_name, side, venue, quantity, price, now, now),
             )
             return
 
@@ -411,6 +441,7 @@ class Database:
         market_id: str,
         market_name: str,
         trade_type: str,
+        venue: str,
         price: float,
         quantity: float,
         signal_sequence_id: int,
@@ -420,14 +451,15 @@ class Database:
         notional = price * quantity
         with self._connect() as conn:
             cur = conn.execute(
-                "INSERT OR IGNORE INTO trades (trade_key, market_row_id, market_id, market_name, type, price, quantity, notional, signal_sequence_id, reason_code, timestamp)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO trades (trade_key, market_row_id, market_id, market_name, type, venue, price, quantity, notional, signal_sequence_id, reason_code, timestamp)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     trade_key,
                     market_row_id,
                     market_id,
                     market_name,
                     trade_type,
+                    venue,
                     price,
                     quantity,
                     notional,
@@ -441,7 +473,7 @@ class Database:
 
             trade_id = cur.lastrowid
             self._update_position_from_trade_conn(
-                conn, market_id, market_name, trade_type, price, quantity
+                conn, market_id, market_name, trade_type, venue, price, quantity
             )
             return True, trade_id
 
@@ -773,14 +805,21 @@ class Database:
         entry_timestamp: str | None = None,
         exit_timestamp: str | None = None,
         timestamp: str | None = None,
+        venue: str = "polymarket",
+        status: str = "closed",
+        source: str | None = None,
+        size: float | None = None,
+        confidence: float | None = None,
+        edge: float | None = None,
+        instrument_type: str | None = None,
     ) -> int:
         ts = timestamp or datetime.utcnow().isoformat()
         entry_ts = entry_timestamp or ts
         exit_ts = exit_timestamp or ts
         with self._connect() as conn:
             cur = conn.execute(
-                "INSERT INTO trades_simulated (symbol, strategy, entry_price, exit_price, direction, pnl, duration_seconds, duration, signal_strength, regime, timeframe, entry_timestamp, exit_timestamp, timestamp) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO trades_simulated (symbol, strategy, entry_price, exit_price, direction, pnl, duration_seconds, duration, venue, status, source, size, confidence, edge, instrument_type, signal_strength, regime, timeframe, entry_timestamp, exit_timestamp, timestamp) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     symbol,
                     normalize_strategy(strategy),
@@ -790,6 +829,13 @@ class Database:
                     float(pnl),
                     int(duration_seconds),
                     int(duration_seconds),
+                    venue,
+                    status,
+                    source,
+                    size,
+                    confidence,
+                    edge,
+                    instrument_type,
                     signal_strength,
                     regime,
                     timeframe,
@@ -799,6 +845,44 @@ class Database:
                 ),
             )
             return cur.lastrowid
+
+    def insert_simulated_trade_open(
+        self,
+        symbol: str,
+        strategy: str,
+        direction: int,
+        entry_price: float,
+        size: float,
+        confidence: float,
+        edge: float,
+        source: str,
+        venue: str,
+        status: str = "open",
+        instrument_type: str = "prediction_market",
+    ) -> int:
+        now = datetime.utcnow().isoformat()
+        return self.insert_simulated_trade(
+            symbol=symbol,
+            strategy=strategy,
+            entry_price=float(entry_price),
+            exit_price=float(entry_price),
+            direction=int(direction),
+            pnl=0.0,
+            duration_seconds=0,
+            signal_strength="open",
+            regime="paper",
+            timeframe="paper_open",
+            entry_timestamp=now,
+            exit_timestamp=now,
+            timestamp=now,
+            venue=venue,
+            status=status,
+            source=source,
+            size=float(size),
+            confidence=float(confidence),
+            edge=float(edge),
+            instrument_type=instrument_type,
+        )
 
     def get_historical_win_rate(
         self,
@@ -891,6 +975,29 @@ class Database:
         query = "SELECT * FROM trades_simulated"
         params: list = []
         filters = []
+        if symbol:
+            filters.append("symbol=?")
+            params.append(symbol)
+        if strategy:
+            filters.append("strategy=?")
+            params.append(strategy)
+        if filters:
+            query += " WHERE " + " AND ".join(filters)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_open_simulated_trades(
+        self,
+        limit: int = 200,
+        symbol: str | None = None,
+        strategy: str | None = None,
+    ) -> list[dict]:
+        query = "SELECT * FROM trades_simulated"
+        params: list = []
+        filters = ["COALESCE(status, 'closed')='open'"]
         if symbol:
             filters.append("symbol=?")
             params.append(symbol)
@@ -1291,6 +1398,7 @@ class Database:
         edge_bp: int,
         strategy: str | None = None,
         why: str | None = None,
+        venue: str = "polymarket",
         symbol: str | None = None,
         signal_sequence_id: int | None = None,
         status: str = "open",
@@ -1301,9 +1409,9 @@ class Database:
         with self._connect() as conn:
             cur = conn.execute(
                 "INSERT INTO arbitrage_opportunities "
-                "(market_id, market_name, arb_type, p_fair, p_mkt, edge_bp, strategy, why, symbol, signal_sequence_id, status, timestamp) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (market_id, market_name, arb_type, p_fair, p_mkt, edge_bp, strategy, why, symbol, signal_sequence_id, status, ts),
+                "(market_id, market_name, arb_type, p_fair, p_mkt, edge_bp, strategy, why, venue, symbol, signal_sequence_id, status, timestamp) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (market_id, market_name, arb_type, p_fair, p_mkt, edge_bp, strategy, why, venue, symbol, signal_sequence_id, status, ts),
             )
             return cur.lastrowid
 

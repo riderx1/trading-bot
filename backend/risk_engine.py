@@ -15,6 +15,21 @@ class RiskEngine:
         self.max_total_exposure = float(cfg["max_total_exposure_usdc"])
         self.max_per_market_exposure = float(cfg["max_per_market_exposure_usdc"])
         self.max_cluster_exposure = float(cfg["max_cluster_exposure_usdc"])
+        risk_cfg = cfg.get("risk", {}) or {}
+        pm_cfg = risk_cfg.get("polymarket", {}) or {}
+        hl_cfg = risk_cfg.get("hyperliquid", {}) or {}
+        self._venue_limits: dict[str, dict[str, float]] = {
+            "polymarket": {
+                "max_total_exposure_usdc": float(pm_cfg.get("max_portfolio_exposure_usdc", self.max_total_exposure)),
+                "max_per_market_exposure_usdc": float(pm_cfg.get("max_per_market_usdc", self.max_per_market_exposure)),
+                "max_cluster_exposure_usdc": float(pm_cfg.get("max_portfolio_exposure_usdc", self.max_cluster_exposure)),
+            },
+            "hyperliquid": {
+                "max_total_exposure_usdc": float(hl_cfg.get("max_portfolio_exposure_usdc", self.max_total_exposure)),
+                "max_per_market_exposure_usdc": float(hl_cfg.get("max_per_market_usdc", self.max_per_market_exposure)),
+                "max_cluster_exposure_usdc": float(hl_cfg.get("max_portfolio_exposure_usdc", self.max_cluster_exposure)),
+            },
+        }
         # Per-arb-type position size caps.
         # model_vs_market is tighter (unproven model) until win-rate data is collected.
         # yes_no_sum is full-sized (risk-free in theory).
@@ -31,14 +46,16 @@ class RiskEngine:
         market_exposure_usdc: float,
         cluster_exposure_usdc: float,
         order_notional_usdc: float,
+        venue: str = "polymarket",
     ) -> RiskResult:
         if self.execution_mode != "paper":
             return RiskResult(False, "risk_mode_not_paper")
-        if total_exposure_usdc + order_notional_usdc > self.max_total_exposure:
+        active = self._venue_limits.get(str(venue), self._venue_limits["polymarket"])
+        if total_exposure_usdc + order_notional_usdc > float(active["max_total_exposure_usdc"]):
             return RiskResult(False, "risk_limit_total_exposure")
-        if market_exposure_usdc + order_notional_usdc > self.max_per_market_exposure:
+        if market_exposure_usdc + order_notional_usdc > float(active["max_per_market_exposure_usdc"]):
             return RiskResult(False, "risk_limit_market_exposure")
-        if cluster_exposure_usdc + order_notional_usdc > self.max_cluster_exposure:
+        if cluster_exposure_usdc + order_notional_usdc > float(active["max_cluster_exposure_usdc"]):
             return RiskResult(False, "risk_limit_cluster_exposure")
         return RiskResult(True, "ok")
 
@@ -48,12 +65,14 @@ class RiskEngine:
         market_exposure_usdc: float,
         cluster_exposure_usdc: float,
         order_notional_usdc: float,
+        venue: str = "polymarket",
     ) -> RiskResult:
         return self.can_open_position(
             total_exposure_usdc,
             market_exposure_usdc,
             cluster_exposure_usdc,
             order_notional_usdc,
+            venue=venue,
         )
 
     def get_arb_type_max_usdc(self, arb_type: str) -> float:
@@ -67,6 +86,7 @@ class RiskEngine:
         market_exposure_usdc: float,
         cluster_exposure_usdc: float,
         order_notional_usdc: float,
+        venue: str = "polymarket",
     ) -> RiskResult:
         """
         Check whether an arbitrage position can be opened.
@@ -82,4 +102,5 @@ class RiskEngine:
             market_exposure_usdc,
             cluster_exposure_usdc,
             order_notional_usdc,
+            venue=venue,
         )

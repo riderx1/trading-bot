@@ -60,6 +60,7 @@ const Index = () => {
           <DecisionHero
             decision={s?.directional_decision ?? null}
             latestSignal={s?.latest_signal ?? null}
+            consensusBlockedCount={s?.consensus_blocked_count ?? 0}
             explainability={s?.decision_explainability ?? null}
           />
         </div>

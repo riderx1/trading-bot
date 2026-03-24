@@ -41,6 +41,12 @@ def validate_config(cfg: dict):
     if cfg["trading"]["mode"] not in {"arbitrage", "signal", "both"}:
         raise ValueError("Invalid trading.mode")
 
+    execution_mode = str(
+        cfg.get("execution_mode", cfg.get("execution", {}).get("mode", "paper"))
+    ).strip().lower()
+    if execution_mode != "paper":
+        raise ValueError("execution_mode must be 'paper'")
+
     if str(cfg["execution"]["mode"]).strip().lower() != "paper":
         raise ValueError("execution.mode must be 'paper'")
 

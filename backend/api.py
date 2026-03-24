@@ -62,6 +62,56 @@ bot.attach_scanner(scanner)
 _start_time = datetime.utcnow()
 
 
+def _strategy_to_venue(strategy: str) -> str:
+    key = str(strategy or "").strip().lower()
+    polymarket_strategies = {"yes_no", "arbitrage", "polymarket_scalp"}
+    if key in polymarket_strategies:
+        return "polymarket"
+    return "hyperliquid"
+
+
+def _group_wallets_by_venue(snapshot: dict, cfg: dict) -> dict:
+    bots = snapshot.get("bots", {}) if isinstance(snapshot, dict) else {}
+    wallet_cfg = cfg.get("paper_wallets", {}) if isinstance(cfg, dict) else {}
+    polymarket_cfg = wallet_cfg.get("polymarket", {}) if isinstance(wallet_cfg, dict) else {}
+    hyperliquid_cfg = wallet_cfg.get("hyperliquid", {}) if isinstance(wallet_cfg, dict) else {}
+
+    grouped = {
+        "polymarket": {},
+        "hyperliquid": {},
+    }
+
+    for label, balance in polymarket_cfg.items():
+        grouped["polymarket"][label] = {
+            "balance": float(balance or 0.0),
+            "pnl": 0.0,
+        }
+    for label, balance in hyperliquid_cfg.items():
+        grouped["hyperliquid"][label] = {
+            "balance": float(balance or 0.0),
+            "pnl": 0.0,
+        }
+
+    for strategy, row in bots.items():
+        available = float((row or {}).get("available_usdc") or 0.0)
+        locked = float((row or {}).get("locked_usdc") or 0.0)
+        equity = float((row or {}).get("equity_usdc") or 0.0)
+        strategy_pnl = equity - (available + locked)
+        venue = _strategy_to_venue(strategy)
+        grouped.setdefault(venue, {})[strategy] = {
+            "balance": equity,
+            "pnl": strategy_pnl,
+        }
+
+    total = 0.0
+    for venue_wallets in grouped.values():
+        for row in venue_wallets.values():
+            total += float(row.get("balance") or 0.0)
+
+    grouped["total"] = round(total, 6)
+    return grouped
+
+
 # ── Lifecycle events ───────────────────────────────────────────────────────────
 
 
@@ -113,6 +163,8 @@ def get_status(symbol: str = Query(default="BTCUSDT")):
         "emit_signals_only": bot.emit_signals_only,
         "paper_trading": bot.paper_trading,
         "paper_wallets": wallets,
+        "paper_wallets_by_venue": _group_wallets_by_venue(wallets, bot.config),
+        "consensus_blocked_count": bot._stats.get("consensus_blocked_count", 0),
         "symbol": target_symbol,
         "supported_symbols": bot.supported_symbols,
         "signal_intervals": bot.signal_intervals,
@@ -153,7 +205,8 @@ def get_status(symbol: str = Query(default="BTCUSDT")):
 @app.get("/paper-wallets", summary="Paper wallet balances by bot/strategy")
 def get_paper_wallets():
     try:
-        return bot.simulation.get_wallet_snapshot()
+        raw = bot.simulation.get_wallet_snapshot()
+        return _group_wallets_by_venue(raw, bot.config)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -173,7 +226,7 @@ def reset_paper_wallets(
         return {
             "status": "ok",
             "message": "paper wallets reset",
-            "result": snapshot,
+            "result": _group_wallets_by_venue(snapshot, bot.config),
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -224,9 +277,38 @@ def get_active_paper_trades(
         if strategy:
             trades = [row for row in trades if str(row.get("strategy", "")) == strategy]
 
+        open_rows = db.get_open_simulated_trades(
+            limit=500,
+            symbol=(symbol.upper() if symbol else None),
+            strategy=strategy,
+        )
+        normalized_open = [
+            {
+                "trade_type": "single",
+                "venue": row.get("venue") or "polymarket",
+                "symbol": str(row.get("symbol") or ""),
+                "strategy": str(row.get("strategy") or ""),
+                "direction": int(row.get("direction") or 0),
+                "side": "LONG" if int(row.get("direction") or 0) > 0 else "SHORT",
+                "entry_price": float(row.get("entry_price") or 0.0),
+                "current_price": None,
+                "quantity": None,
+                "stake_usdc": float(row.get("size") or 0.0),
+                "unrealized_pnl": float(row.get("pnl") or 0.0),
+                "opened_at": str(row.get("entry_timestamp") or row.get("timestamp") or ""),
+                "duration_seconds": int(row.get("duration_seconds") or 0),
+                "signal_strength": row.get("signal_strength"),
+                "regime": row.get("regime"),
+                "timeframe": row.get("timeframe"),
+            }
+            for row in open_rows
+        ]
+        merged = trades + normalized_open
+        merged.sort(key=lambda row: str(row.get("opened_at") or ""), reverse=True)
+
         return {
-            "count": len(trades),
-            "trades": trades,
+            "count": len(merged),
+            "trades": merged,
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -235,7 +317,9 @@ def get_active_paper_trades(
 @app.get("/performance/summary", summary="Performance summary")
 def get_performance_summary():
     try:
-        return db.get_performance_summary()
+        payload = db.get_performance_summary()
+        payload["venue"] = "mixed"
+        return payload
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -281,8 +365,24 @@ def get_strategy_rankings(recompute: bool = Query(default=False)):
     try:
         if recompute:
             rankings = db.recompute_strategy_performance()
-            return {"strategies": rankings}
-        return {"strategies": db.get_strategy_rankings()}
+            return {
+                "strategies": [
+                    {
+                        **row,
+                        "venue": _strategy_to_venue(str(row.get("strategy") or "")),
+                    }
+                    for row in rankings
+                ]
+            }
+        return {
+            "strategies": [
+                {
+                    **row,
+                    "venue": _strategy_to_venue(str(row.get("strategy") or "")),
+                }
+                for row in db.get_strategy_rankings()
+            ]
+        }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
