@@ -55,7 +55,7 @@ export interface VenueWalletRow {
 }
 
 export interface VenueWalletSnapshot {
-  polymarket: Record<string, VenueWalletRow>;
+  polymarket?: Record<string, VenueWalletRow>;
   hyperliquid: Record<string, VenueWalletRow>;
   total: number;
 }
@@ -279,7 +279,7 @@ export interface ActivePaperTrade {
   symbol: string;
   strategy: string;
   direction: number;
-  side: string;
+  side: "BUY" | "SELL" | "LONG" | "SHORT" | "YES" | "NO";
   entry_price: number;
   current_price: number | null;
   quantity: number | null;
@@ -307,6 +307,67 @@ export interface LogEntry {
   context: unknown;
 }
 
+export interface BacktestRunRequest {
+  symbol: string;
+  venue?: "hyperliquid";
+  market_type?: "updown" | "all";
+  timeframe: "5m" | "15m" | "1h" | "4h" | "1d";
+  start_ts: string;
+  end_ts: string;
+  initial_capital?: number;
+  lookback_bars?: number;
+  enable_signal_strategy?: boolean;
+  enable_funding_arb?: boolean;
+  enable_basis_arb?: boolean;
+  slippage_bps?: number;
+  fee_bps?: number;
+}
+
+export interface BacktestRun {
+  run_id: string;
+  status: "queued" | "running" | "cancelling" | "cancelled" | "completed" | "failed";
+  symbol: string;
+  venue: string;
+  market_type: string;
+  start_ts: string;
+  end_ts: string;
+  timeframe: string;
+  strategy_scope: string;
+  params: Record<string, unknown>;
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  error_message?: string | null;
+}
+
+export interface BacktestMetrics {
+  total_return: number;
+  annualized_return: number;
+  max_drawdown: number;
+  sharpe: number;
+  sortino: number;
+  calmar: number;
+  win_rate: number;
+  profit_factor: number;
+  expectancy: number;
+  trades_count: number;
+  avg_holding_period_seconds: number;
+  exposure_ratio: number;
+  gross_profit: number;
+  gross_loss: number;
+  fees_paid: number;
+  slippage_paid: number;
+}
+
+export interface BacktestReport {
+  run: BacktestRun;
+  metrics: BacktestMetrics | null;
+  equity_curve: Array<{ timestamp: string; value: number }>;
+  drawdown_curve: Array<{ timestamp: string; drawdown_pct: number }>;
+  trades: Array<Record<string, unknown>>;
+  events: Array<{ ts: string; level: string; message: string; payload: Record<string, unknown> }>;
+}
+
 // ─── API Functions ───────────────────────────────────────────
 
 async function fetchJson<T>(path: string, params?: Record<string, string>): Promise<T> {
@@ -317,6 +378,38 @@ async function fetchJson<T>(path: string, params?: Record<string, string>): Prom
   const res = await fetch(url.toString());
   if (!res.ok) throw new Error(`API ${res.status}: ${path}`);
   return res.json();
+}
+
+async function postJson<T>(path: string, payload: unknown): Promise<T> {
+  const url = new URL(path, BASE_URL);
+  const res = await fetch(url.toString(), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`API ${res.status}: ${path}`);
+  return res.json();
+}
+
+async function postNoBodyJson<T>(path: string): Promise<T> {
+  const url = new URL(path, BASE_URL);
+  const res = await fetch(url.toString(), {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`API ${res.status}: ${path}`);
+  return res.json();
+}
+
+async function fetchBlob(path: string, params?: Record<string, string>): Promise<Blob> {
+  const url = new URL(path, BASE_URL);
+  if (params) {
+    Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+  }
+  const res = await fetch(url.toString());
+  if (!res.ok) throw new Error(`API ${res.status}: ${path}`);
+  return res.blob();
 }
 
 function normalizeDecision(raw: any): OrchestratedDecision | null {
@@ -539,6 +632,34 @@ export const api = {
 
   getLogs: (limit = 50) =>
     fetchJson<{ logs: LogEntry[] }>("/logs", { limit: String(limit) }),
+
+  runBacktest: (payload: BacktestRunRequest) =>
+    postJson<{ run_id: string; status: string }>("/backtest/run", payload),
+
+  getBacktestStatus: (runId: string) =>
+    fetchJson<{
+      run: BacktestRun;
+      is_active_thread: boolean;
+      latest_events: Array<{ ts: string; level: string; message: string; payload: Record<string, unknown> }>;
+    }>(`/backtest/status/${runId}`),
+
+  getBacktestResult: (runId: string) =>
+    fetchJson<BacktestReport>(`/backtest/result/${runId}`),
+
+  listBacktestRuns: (limit = 25, offset = 0) =>
+    fetchJson<{ runs: BacktestRun[]; pagination: { limit: number; offset: number; returned: number } }>(
+      "/backtest/runs",
+      { limit: String(limit), offset: String(offset) },
+    ),
+
+  cancelBacktest: (runId: string) =>
+    postNoBodyJson<{ status: string; run_id: string }>(`/backtest/cancel/${runId}`),
+
+  exportBacktestTradesCsv: (runId: string) =>
+    fetchBlob(`/backtest/export/${runId}`, { format: "csv" }),
+
+  exportBacktestEquityCsv: (runId: string) =>
+    fetchBlob(`/backtest/export/${runId}`, { format: "equity_csv" }),
 
   resetWallets: (clearHistory = false) =>
     fetch(`${BASE_URL}/paper-wallets/reset?confirm=true&clear_history=${clearHistory ? "true" : "false"}`, {

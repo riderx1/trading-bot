@@ -4,32 +4,41 @@ from __future__ import annotations
 
 STRATEGIES = {
     "directional": [
+        "trend",
         "momentum",
         "reversal",
+        "breakout",
+        "mean_reversion",
+        "volatility",
         "scalping",
     ],
     "confirmation": [
         "ta_confluence",
     ],
     "arbitrage": [
-        "yes_no",
-        "model_vs_market",
-        "cross_venue",
+        "funding_arb",
+        "basis_arb",
     ],
 }
 
 LEGACY_TO_CANONICAL = {
+    "trend_following": "trend",
     "momentum_trend": "momentum",
     "reversal_fade": "reversal",
-    "arbitrage": "yes_no",
-    "perp_arb": "cross_venue",
+    "arbitrage": "funding_arb",
+    "yes_no": "funding_arb",
+    "model_vs_market": "volatility",
+    "cross_venue": "basis_arb",
+    "perp_arb": "basis_arb",
+    "polymarket_scalp": "scalping",
 }
 
 CANONICAL_TO_LEGACY = {
+    "trend": "trend_following",
     "momentum": "momentum_trend",
     "reversal": "reversal_fade",
-    "yes_no": "arbitrage",
-    "cross_venue": "perp_arb",
+    "funding_arb": "arbitrage",
+    "basis_arb": "perp_arb",
 }
 
 

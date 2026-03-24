@@ -1,5 +1,4 @@
 import { useWallets } from "@/hooks/use-trading-data";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 export default function WalletPage() {
   const wallets = useWallets();
@@ -37,18 +36,8 @@ export default function WalletPage() {
         <p className="font-mono text-sm text-foreground">Total Portfolio: ${Number(data?.total ?? 0).toFixed(2)}</p>
       </div>
       <div className="max-w-2xl rounded-lg border border-border bg-card p-4">
-        <Tabs defaultValue="polymarket">
-          <TabsList className="mb-4">
-            <TabsTrigger value="polymarket">Polymarket</TabsTrigger>
-            <TabsTrigger value="hyperliquid">Hyperliquid</TabsTrigger>
-          </TabsList>
-          <TabsContent value="polymarket">
-            {renderVenueRows(data?.polymarket ?? {})}
-          </TabsContent>
-          <TabsContent value="hyperliquid">
-            {renderVenueRows(data?.hyperliquid ?? {})}
-          </TabsContent>
-        </Tabs>
+        <h2 className="mb-3 font-mono text-sm font-semibold text-foreground">Hyperliquid</h2>
+        {renderVenueRows(data?.hyperliquid ?? {})}
       </div>
     </div>
   );

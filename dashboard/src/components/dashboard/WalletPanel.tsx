@@ -7,12 +7,15 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
 const STRATEGY_LABELS: Record<string, string> = {
+  trend: "Trend",
   momentum: "Momentum",
   ta_confluence: "TA",
   reversal: "Reversal",
-  yes_no: "Yes/No Arb",
-  model_vs_market: "Model/FV",
-  cross_venue: "Cross Venue",
+  breakout: "Breakout",
+  mean_reversion: "Mean Reversion",
+  funding_arb: "Funding Arb",
+  basis_arb: "Basis Arb",
+  volatility: "Volatility",
   scalping: "Scalping",
 };
 
@@ -40,24 +43,16 @@ export function WalletPanel({ wallets }: Props) {
   };
 
   const total = wallets?.total ?? 0;
-  const initial = 80;
+  const initial = 140;
   const pnl = total - initial;
   const pnlPct = initial > 0 ? (pnl / initial) * 100 : 0;
 
-  const entries = [
-    ...Object.entries(wallets?.polymarket ?? {}).map(([strategy, row]) => ({
-      strategy,
-      venue: "polymarket",
-      balance: Number(row.balance ?? 0),
-      pnl: Number(row.pnl ?? 0),
-    })),
-    ...Object.entries(wallets?.hyperliquid ?? {}).map(([strategy, row]) => ({
+  const entries = Object.entries(wallets?.hyperliquid ?? {}).map(([strategy, row]) => ({
       strategy,
       venue: "hyperliquid",
       balance: Number(row.balance ?? 0),
       pnl: Number(row.pnl ?? 0),
-    })),
-  ];
+    }));
 
   return (
     <div className="rounded-lg border border-border bg-card p-4">
@@ -106,7 +101,7 @@ export function WalletPanel({ wallets }: Props) {
                 animate={{ opacity: 1 }}
                 className="flex items-center gap-2"
               >
-                <div className={`h-2 w-2 rounded-full ${venue === "polymarket" ? "bg-yellow-400" : "bg-cyan-400"}`} />
+                <div className="h-2 w-2 rounded-full bg-cyan-400" />
                 <span className="flex-1 font-mono text-xs text-muted-foreground">{label}</span>
                 <span className="font-mono text-xs font-medium text-foreground">
                   ${balance.toFixed(2)}

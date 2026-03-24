@@ -561,6 +561,160 @@ class BinanceClient:
         }
 
 
+# ── Strategy Worker ──────────────────────────────────────────────────────────
+
+
+class StrategyWorker:
+    """
+    Autonomous per-strategy unit for the 10-bot Hyperliquid paper trading suite.
+
+    Each worker:
+    - Has its own entry-condition logic tuned to its strategy type.
+    - Tracks a per-symbol cooldown so concurrent workers don't step on each other.
+    - Never shares state with sibling workers.
+
+    Capital allocation ($14 USDC each) is enforced by SimulationEngine wallets.
+    """
+
+    # Minimum confidence required before directional entry (per strategy).
+    _CONF_FLOOR: dict[str, float] = {
+        "trend":          0.55,
+        "momentum":       0.35,
+        "ta_confluence":  0.40,
+        "reversal":       0.35,
+        "breakout":       0.60,
+        "mean_reversion": 0.30,
+        "scalping":       0.20,   # uses micro conditions, not confidence
+        "funding_arb":    0.0,
+        "basis_arb":      0.0,
+        "volatility":     0.0,
+    }
+
+    def __init__(self, strategy: str) -> None:
+        self.strategy = strategy
+        self._cooldowns: dict[str, float] = {}   # symbol → expiry epoch-seconds
+        self._lock = threading.Lock()
+
+    def is_on_cooldown(self, symbol: str) -> bool:
+        with self._lock:
+            return time.time() < self._cooldowns.get(symbol, 0.0)
+
+    def set_cooldown(self, symbol: str, seconds: float) -> None:
+        with self._lock:
+            self._cooldowns[symbol] = time.time() + seconds
+
+    # ── Directional evaluation ────────────────────────────────────────────────
+
+    def evaluate_directional(
+        self,
+        signal_snapshot: dict,
+        symbol: str,
+    ) -> tuple[bool, int, str]:
+        """
+        Decide whether to enter based on a Binance signal snapshot.
+
+        Returns:
+            (should_enter, direction, reason_string)
+            direction: +1 = long/buy, -1 = short/sell
+        """
+        if self.is_on_cooldown(symbol):
+            return False, 0, "cooldown"
+
+        trend = str(signal_snapshot.get("trend") or "neutral")
+        confidence = float(signal_snapshot.get("confidence") or 0.0)
+        regime = str(signal_snapshot.get("regime") or "CHOP")
+        micro_data = signal_snapshot.get("micro_data") or {}
+        timeframes = signal_snapshot.get("timeframes") or {}
+        conf_floor = self._CONF_FLOOR.get(self.strategy, 0.4)
+
+        if self.strategy == "scalping":
+            move_pct = float(micro_data.get("move_pct_short") or 0.0)
+            spread_bps = float(micro_data.get("spread_bps") or 999.0)
+            volume_spike = bool(micro_data.get("volume_spike"))
+            if not (volume_spike and spread_bps <= 15.0 and abs(move_pct) >= 0.001):
+                return False, 0, f"scalp:no_setup spread={spread_bps:.0f}bp vol={volume_spike}"
+            return True, (1 if move_pct > 0 else -1), f"scalp:move={move_pct:.4f} spread={spread_bps:.0f}bp"
+
+        if self.strategy == "reversal":
+            if regime != "REVERSAL":
+                return False, 0, f"reversal:regime={regime}!=REVERSAL"
+            if trend == "neutral" or confidence < conf_floor:
+                return False, 0, f"reversal:trend={trend} conf={confidence:.2f}"
+            return True, (-1 if trend == "bullish" else 1), f"reversal:fade trend={trend} conf={confidence:.2f}"
+
+        if self.strategy == "trend":
+            htf = [timeframes.get(tf, {}).get("trend", "neutral") for tf in ("1h", "4h", "1d")]
+            aligned = htf.count(trend)
+            if trend == "neutral" or aligned < 2 or confidence < conf_floor:
+                return False, 0, f"trend:htf_aligned={aligned}/3 conf={confidence:.2f}"
+            return True, (1 if trend == "bullish" else -1), f"trend:htf_aligned={aligned}/3 conf={confidence:.2f}"
+
+        if self.strategy == "momentum":
+            stf = [timeframes.get(tf, {}).get("trend", "neutral") for tf in ("5m", "15m")]
+            if trend == "neutral" or confidence < conf_floor or trend not in stf:
+                return False, 0, f"momentum:stf={stf} conf={confidence:.2f}"
+            return True, (1 if trend == "bullish" else -1), f"momentum:stf={'/'.join(stf)} conf={confidence:.2f}"
+
+        if self.strategy == "ta_confluence":
+            if trend == "neutral" or confidence < conf_floor:
+                return False, 0, f"ta_confluence:trend={trend} conf={confidence:.2f}"
+            return True, (1 if trend == "bullish" else -1), f"ta_confluence:trend={trend} conf={confidence:.2f}"
+
+        if self.strategy == "breakout":
+            move_5m = abs(float((timeframes.get("5m") or {}).get("move_pct") or 0.0))
+            if trend == "neutral" or confidence < conf_floor or move_5m < 0.003:
+                return False, 0, f"breakout:move_5m={move_5m:.4f} conf={confidence:.2f}"
+            return True, (1 if trend == "bullish" else -1), f"breakout:move_5m={move_5m:.4f} conf={confidence:.2f}"
+
+        if self.strategy == "mean_reversion":
+            if regime == "TRENDING" or trend == "neutral" or confidence < conf_floor:
+                return False, 0, f"mean_rev:regime={regime} trend={trend}"
+            move_1h = float((timeframes.get("1h") or {}).get("move_pct") or 0.0)
+            if abs(move_1h) < 0.005:
+                return False, 0, f"mean_rev:move_1h={move_1h:.4f}<0.005"
+            return True, (-1 if move_1h > 0 else 1), f"mean_rev:move_1h={move_1h:.4f} regime={regime}"
+
+        return False, 0, f"{self.strategy}:no_directional_rule"
+
+    # ── Arb evaluation ────────────────────────────────────────────────────────
+
+    def evaluate_arb(
+        self,
+        perp_context: dict,
+        symbol: str,
+        min_funding_spread: float = 0.0001,
+        min_basis_bp: float = 5.0,
+    ) -> tuple[bool, int, str]:
+        """
+        Decide whether to enter an arb position from perp context data.
+
+        Returns (should_enter, direction, reason_string).
+        """
+        if self.is_on_cooldown(symbol):
+            return False, 0, "cooldown"
+
+        if self.strategy == "funding_arb":
+            funding_spread = float(perp_context.get("funding_spread") or 0.0)
+            hl_fund = float(perp_context.get("hl_funding_rate") or 0.0)
+            if abs(funding_spread) < min_funding_spread:
+                return False, 0, f"funding_arb:spread={funding_spread:.6f}<min={min_funding_spread}"
+            direction = 1 if hl_fund < 0 else -1
+            return True, direction, f"funding_arb:spread={funding_spread:.6f} hl_rate={hl_fund:.6f}"
+
+        if self.strategy == "basis_arb":
+            basis_diff = float(perp_context.get("basis_diff") or 0.0)
+            bin_perp = float(perp_context.get("binance_perp_price") or 0.0)
+            hl_perp = float(perp_context.get("hl_perp_price") or 0.0)
+            if not (bin_perp and hl_perp):
+                return False, 0, "basis_arb:missing_perp_prices"
+            bp = abs(basis_diff / max(bin_perp, hl_perp, 1.0)) * 10_000
+            if bp < min_basis_bp:
+                return False, 0, f"basis_arb:bp={bp:.1f}<min={min_basis_bp}"
+            return True, (-1 if basis_diff > 0 else 1), f"basis_arb:bp={bp:.1f} bin={bin_perp:.2f} hl={hl_perp:.2f}"
+
+        return False, 0, f"{self.strategy}:no_arb_rule"
+
+
 # ── Trading Bot ───────────────────────────────────────────────────────────────
 
 
@@ -628,10 +782,16 @@ class TradingBot:
         self.confidence_density_threshold: float = float(trading_cfg.get("confidence_density_threshold", 12.0))
         self.confidence_density_window_minutes: int = int(trading_cfg.get("confidence_density_window_minutes", 30))
         self.strategies: list[str] = [
+            "trend",
             "momentum",
             "ta_confluence",
             "reversal",
-            "yes_no",
+            "breakout",
+            "mean_reversion",
+            "funding_arb",
+            "basis_arb",
+            "volatility",
+            "scalping",
         ]
 
         # Runtime state
@@ -655,7 +815,7 @@ class TradingBot:
         self._poly_thread: threading.Thread | None = None
 
         # API clients
-        poly_cfg = self.config["polymarket"]
+        poly_cfg = self.config.get("polymarket", {})
         bin_cfg = self.config["binance"]
         primary_symbol = str(bin_cfg.get("symbol", "BTCUSDT")).upper()
         self.signal_intervals: list[str] = bin_cfg.get(
@@ -727,6 +887,11 @@ class TradingBot:
             "1h": r"\b1\s*(h|hr|hour|hours)\b|\b60\s*(m|min|mins|minute|minutes)\b|\b1h\b",
             "4h": r"\b4\s*(h|hr|hour|hours)\b|\b240\s*(m|min|mins|minute|minutes)\b|\b4h\b",
             "1d": r"\b24\s*(h|hr|hour|hours)\b|\b1\s*(d|day|days)\b|\b1d\b|\btoday\b",
+        }
+
+        # ── Strategy workers (10 independent bots, one per strategy) ──────────
+        self._strategy_workers: dict[str, StrategyWorker] = {
+            s: StrategyWorker(s) for s in self.strategies
         }
 
     # ── Internal logging ────────────────────────────────────────────────────────
@@ -805,9 +970,9 @@ class TradingBot:
         if self._is_scalping_setup(micro_data):
             return "scalping"
         if reason_code and "arb" in reason_code:
-            return "yes_no"
+            return "funding_arb"
         if edge is not None and edge >= max(self.min_edge, 0.01):
-            return "yes_no"
+            return "funding_arb"
         if regime == "REVERSAL":
             return "reversal"
         if confidence >= self.strong_signal_floor and trend in {"bullish", "bearish"}:
@@ -821,9 +986,12 @@ class TradingBot:
                 "momentum": 0.0,
                 "ta_confluence": 0.0,
                 "reversal": 0.0,
-                "yes_no": 0.0,
-                "model_vs_market": 0.0,
-                "cross_venue": 0.0,
+                "trend": 0.0,
+                "breakout": 0.0,
+                "mean_reversion": 0.0,
+                "funding_arb": 0.0,
+                "basis_arb": 0.0,
+                "volatility": 0.0,
                 "scalping": 0.0,
             }
         return {
@@ -1297,24 +1465,9 @@ class TradingBot:
             )
 
         direction = self._direction_from_trend(signal_snapshot.get("trend", "neutral"))
-        self.simulation.on_signal(
-            symbol=active_symbol,
-            strategy=strategy,
-            direction=direction,
-            entry_price=float(signal_snapshot.get("value") or 0.0),
-            timestamp=signal_snapshot["timestamp"],
-            signal_strength=str(signal_snapshot.get("signal_strength") or "weak"),
-            regime=regime,
-            timeframe="consensus",
-            confidence=signal_snapshot.get("confidence", 0.0),
-            edge=max(self.min_edge, 0.01),
-            risk_factor=self._risk_factor_for_setup(
-                str(signal_snapshot.get("signal_strength") or "weak"),
-                float(signal_snapshot.get("confidence") or 0.0),
-            ),
-            max_duration_minutes=15 if strategy == "scalping" else None,
-            spread_bps=float((signal_snapshot.get("micro_data") or {}).get("spread_bps") or 0.0),
-        )
+        # NOTE: simulation.on_signal is now handled per-strategy by StrategyWorker
+        # via _dispatch_directional_workers called from _poll_binance.
+        _ = direction  # retained for orchestrated-decision use below
 
         orchestrated = self.orchestrator.output_decision(
             active_symbol,
@@ -1509,9 +1662,9 @@ class TradingBot:
             p_fair=result.p_fair,
             p_mkt=result.p_mkt,
             edge_bp=result.edge_bp,
-            strategy="model_vs_market" if result.arb_type == "model_vs_market" else "yes_no",
+            strategy="volatility" if result.arb_type == "model_vs_market" else "funding_arb",
             why=result.why,
-            venue="polymarket",
+            venue="hyperliquid",
             symbol=active_symbol,
             signal_sequence_id=int(
                 signal_snapshot.get("signal_sequence_id")
@@ -1864,15 +2017,9 @@ class TradingBot:
         trade_key = f"{market_id}:{trade_type}:{signal_sequence_id}:{time_bucket}"
 
         execution_market = dict(market)
-        token_id = execution_market.get("yes_token_id") if trade_type == "YES" else execution_market.get("no_token_id")
-        if token_id:
-            tob = self.polymarket.get_top_of_book(str(token_id))
-            best_ask = tob.get("best_ask")
-            if best_ask is not None:
-                execution_market["best_ask"] = best_ask
-            spread_bps = tob.get("spread_bps")
-            if spread_bps is not None:
-                execution_market["spread_bps"] = spread_bps
+        execution_market["mark_price"] = reference_price
+        execution_market.setdefault("best_ask", reference_price)
+        execution_market.setdefault("best_bid", reference_price)
 
         if self.db.has_recent_trade(market_id, trade_type, self.cooldown_seconds):
             self._log(
@@ -1882,9 +2029,8 @@ class TradingBot:
             return
 
         bot_type = str(signal_snapshot.get("bot_type") or strategy_domain(strategy))
-        is_polymarket_flow = bot_type in ("arbitrage", "polymarket_scalp")
-        venue = "polymarket" if is_polymarket_flow else "hyperliquid"
-        instrument_type = "prediction_market" if venue == "polymarket" else "perp"
+        venue = "hyperliquid"
+        instrument_type = "perp"
 
         cluster = self._cluster_for_market(market_name)
         total_exposure = self.db.get_total_open_exposure_usdc()
@@ -1923,11 +2069,7 @@ class TradingBot:
             "instrument_type": instrument_type,
         }
 
-        execution_client = (
-            self.polymarket_execution_client
-            if is_polymarket_flow
-            else self.hyperliquid_execution_client
-        )
+        execution_client = self.hyperliquid_execution_client
         execution = execution_client.submit(
             trade_intent=trade_intent,
             market=execution_market,
@@ -1952,13 +2094,130 @@ class TradingBot:
             size=trade_notional,
             confidence=confidence,
             edge=edge,
-            source="polymarket_paper",
+            source="hyperliquid_paper",
             venue=venue,
             status="open",
             instrument_type=instrument_type,
         )
 
     # ── Polling threads ─────────────────────────────────────────────────────────
+
+    # Ordered lists used by the two dispatch methods below.
+    _DIRECTIONAL_STRATEGIES = (
+        "trend", "momentum", "ta_confluence", "reversal",
+        "breakout", "mean_reversion", "scalping",
+    )
+    _ARB_STRATEGIES = ("funding_arb", "basis_arb")
+
+    def _dispatch_directional_workers(self, signal_snapshot: dict, symbol: str) -> None:
+        """
+        Fan out a Binance signal to all 7 directional strategy workers.
+
+        Each worker independently evaluates its own entry criteria and calls
+        simulation.on_signal only if its strategy-specific conditions are met.
+        """
+        for strategy_name in self._DIRECTIONAL_STRATEGIES:
+            worker = self._strategy_workers.get(strategy_name)
+            if not worker:
+                continue
+            try:
+                should_enter, direction, reason = worker.evaluate_directional(signal_snapshot, symbol)
+                if not should_enter:
+                    continue
+                confidence = float(signal_snapshot.get("confidence") or 0.0)
+                signal_strength = str(signal_snapshot.get("signal_strength") or "weak")
+                regime = str(signal_snapshot.get("regime") or "CHOP")
+                spread_bps = float((signal_snapshot.get("micro_data") or {}).get("spread_bps") or 0.0)
+                self.simulation.on_signal(
+                    symbol=symbol,
+                    strategy=strategy_name,
+                    direction=direction,
+                    entry_price=float(signal_snapshot.get("value") or 0.0),
+                    timestamp=signal_snapshot["timestamp"],
+                    signal_strength=signal_strength,
+                    regime=regime,
+                    timeframe="consensus",
+                    confidence=confidence,
+                    edge=max(self.min_edge, 0.01),
+                    risk_factor=self._risk_factor_for_setup(signal_strength, confidence),
+                    max_duration_minutes=15 if strategy_name == "scalping" else None,
+                    spread_bps=spread_bps,
+                )
+                worker.set_cooldown(symbol, float(self.cooldown_seconds))
+                self._log(
+                    f"[WORKER:{strategy_name}] {symbol} dir={direction:+d} "
+                    f"conf={confidence:.2f} | {reason}"
+                )
+            except Exception as exc:
+                self._log(
+                    f"Directional worker error ({strategy_name}/{symbol}): {exc}",
+                    level="ERROR",
+                )
+
+    def _dispatch_arb_workers(self, perp_context: dict, symbol: str) -> None:
+        """
+        Fan out Hyperliquid perp context to both arb strategy workers.
+
+        funding_arb reacts to funding-rate spreads.
+        basis_arb reacts to cross-venue price divergence.
+        """
+        perp_arb_cfg = self.config.get("perp_arb", {})
+        min_funding_spread = float(perp_arb_cfg.get("min_funding_spread", 0.0001))
+        min_basis_bp = float(perp_arb_cfg.get("cross_venue_threshold_bp", 5.0))
+        exit_bp = float(perp_arb_cfg.get("exit_threshold_bp", 2.0))
+        stop_bp = float(perp_arb_cfg.get("stop_loss_bp", 20.0))
+
+        for strategy_name in self._ARB_STRATEGIES:
+            worker = self._strategy_workers.get(strategy_name)
+            if not worker:
+                continue
+            try:
+                should_enter, direction, reason = worker.evaluate_arb(
+                    perp_context, symbol, min_funding_spread, min_basis_bp
+                )
+                if not should_enter:
+                    continue
+
+                fund_spread = float(perp_context.get("funding_spread") or 0.0)
+                basis_diff = float(perp_context.get("basis_diff") or 0.0)
+                hl_perp = float(perp_context.get("hl_perp_price") or 1.0)
+                bin_perp = float(perp_context.get("binance_perp_price") or 0.0)
+
+                edge_bp = (
+                    abs(fund_spread) * 10_000
+                    if strategy_name == "funding_arb"
+                    else abs(basis_diff / max(hl_perp, bin_perp, 1.0)) * 10_000
+                )
+                confidence = min(0.85, 0.4 + edge_bp / 200.0)
+                signal_strength = "medium" if confidence >= 0.5 else "weak"
+
+                self.simulation.on_pair_signal(
+                    symbol=symbol,
+                    strategy=strategy_name,
+                    direction=direction,
+                    binance_price=bin_perp,
+                    hl_price=hl_perp,
+                    funding_spread=fund_spread,
+                    timestamp=datetime.utcnow().isoformat(),
+                    signal_strength=signal_strength,
+                    regime="ARB",
+                    confidence=confidence,
+                    edge_bp=edge_bp,
+                    risk_factor=self._risk_factor_for_setup(signal_strength, confidence),
+                    entry_threshold_bp=min_basis_bp,
+                    exit_threshold_bp=exit_bp,
+                    stop_loss_bp=stop_bp,
+                )
+                worker.set_cooldown(symbol, float(self.cooldown_seconds))
+                self._log(
+                    f"[WORKER:{strategy_name}] {symbol} dir={direction:+d} "
+                    f"edge_bp={edge_bp:.1f} | {reason}"
+                )
+            except Exception as exc:
+                self._log(
+                    f"Arb worker error ({strategy_name}/{symbol}): {exc}",
+                    level="ERROR",
+                )
 
     def _poll_binance(self):
         """
@@ -1982,6 +2241,7 @@ class TradingBot:
                     signal_snapshot = self._build_signal_snapshot(symbol)
                     if signal_snapshot is not None:
                         self._persist_signal_snapshot(signal_snapshot, symbol)
+                        self._dispatch_directional_workers(signal_snapshot, symbol)
                         with self._lock:
                             self.latest_signals[symbol] = signal_snapshot
                             if symbol == self.binance.symbol:
@@ -2076,38 +2336,17 @@ class TradingBot:
                     except Exception as exc:
                         self._log(f"DB perp_basis insert failed ({symbol}): {exc}", level="WARNING")
 
-                    # Detect cross-venue arb opportunity.
+                    # Detect cross-venue / funding arb opportunities and dispatch workers.
                     if hl_perp and bin_perp:
                         ref = max(hl_perp, bin_perp, 1.0)
                         bp = abs(basis_diff / ref) * 10_000
-                        pair_direction = -1 if basis_diff > 0 else 1
-                        with self._lock:
-                            latest_signal = self.latest_signals.get(symbol, {}).copy()
-                        signal_strength = str(latest_signal.get("signal_strength") or "medium")
-                        regime = str(latest_signal.get("regime") or "CHOP")
-                        confidence = float(latest_signal.get("confidence") or 0.45)
 
-                        self.simulation.on_pair_signal(
-                            symbol=symbol,
-                            strategy="cross_venue",
-                            direction=pair_direction,
-                            binance_price=float(bin_perp),
-                            hl_price=float(hl_perp),
-                            funding_spread=float(funding_spread),
-                            timestamp=hl_snap.fetched_at if hl_snap else datetime.utcnow().isoformat(),
-                            signal_strength=signal_strength,
-                            regime=regime,
-                            confidence=min(0.85, 0.4 + bp / 200.0 + abs(funding_spread) * 10.0),
-                            edge_bp=max(bp, abs(funding_spread) * 10_000),
-                            risk_factor=self._risk_factor_for_setup(signal_strength, confidence),
-                            entry_threshold_bp=cross_venue_threshold_bp,
-                            exit_threshold_bp=exit_threshold_bp,
-                            stop_loss_bp=stop_loss_bp,
-                        )
+                        # Workers (basis_arb + funding_arb) evaluate independently.
+                        self._dispatch_arb_workers(ctx, symbol)
 
                         if bp >= cross_venue_threshold_bp:
                             self._log(
-                                f"[PerpArb] {symbol} cross_venue basis={bp:.1f}bp "
+                                f"[PerpArb] {symbol} basis_arb basis={bp:.1f}bp "
                                 f"bin={bin_perp:.2f} hl={hl_perp:.2f} "
                                 f"fund_spread={funding_spread:.6f}"
                             )
@@ -2115,11 +2354,11 @@ class TradingBot:
                                 self.db.insert_arb_opportunity(
                                     market_id=f"perp_arb_{symbol}",
                                     market_name=f"{symbol} cross-venue perp basis",
-                                    arb_type="cross_venue",
+                                    arb_type="basis_arb",
                                     p_fair=None,
                                     p_mkt=None,
                                     edge_bp=int(round(bp)),
-                                    strategy="cross_venue",
+                                    strategy="basis_arb",
                                     venue="hyperliquid",
                                     why=(
                                         f"Binance perp={bin_perp:.2f} HL perp={hl_perp:.2f} "
@@ -2132,7 +2371,7 @@ class TradingBot:
                                 self._log(f"DB arb_opp insert (perp) failed: {exc}", level="WARNING")
                         elif abs(funding_spread) >= min_funding_spread:
                             self._log(
-                                f"[PerpArb] {symbol} funding-only signal fund_spread={funding_spread:.6f} "
+                                f"[PerpArb] {symbol} funding_arb signal fund_spread={funding_spread:.6f} "
                                 f"bin={bin_perp:.2f} hl={hl_perp:.2f}",
                                 level="INFO",
                             )
@@ -2143,88 +2382,10 @@ class TradingBot:
 
 
     def _poll_polymarket(self):
-        """
-        Background thread: fetch Polymarket prices and run trade evaluation.
-
-        Interval: config.json → polymarket.polling_interval_seconds (default 3600 s).
-        Stores each market snapshot in the DB, then runs the configured trade mode.
-        """
-        interval = self.config["polymarket"]["polling_interval_seconds"]
-        self._log(f"Polymarket poller started (interval={interval}s)")
+        """Deprecated poller retained for compatibility in Hyperliquid-only mode."""
+        self._log("Polymarket poller is disabled in Hyperliquid-only mode.", level="INFO")
         while self.running:
-            try:
-                markets = self.polymarket.get_markets()
-                filtered_markets = [
-                    market for market in markets
-                    if self.polymarket.is_relevant_market(market.get("market_name", ""))
-                ]
-                primary_symbol = self.binance.symbol
-                with self._lock:
-                    self.latest_markets = filtered_markets
-
-                with self._lock:
-                    primary_signal = self.latest_signals.get(primary_symbol, {}).copy()
-
-                if self.mode in {"signal", "both"} and not primary_signal:
-                    signal_snapshot = self._build_signal_snapshot(primary_symbol)
-                    if signal_snapshot is not None:
-                        self._persist_signal_snapshot(signal_snapshot, primary_symbol)
-                        with self._lock:
-                            self.latest_signals[primary_symbol] = signal_snapshot
-                            self.latest_signal = signal_snapshot
-                            primary_signal = signal_snapshot.copy()
-
-                for market in filtered_markets:
-                    market_symbol = self._symbol_for_market(market.get("market_name", ""))
-                    with self._lock:
-                        current_signal = self.latest_signals.get(market_symbol, {}).copy()
-
-                    market_id = self.db.insert_market(
-                        market["market_id"],
-                        market["market_name"],
-                        market["yes_price"],
-                        market["no_price"],
-                        market["yes_ask"],
-                        market["no_ask"],
-                        market["spread_bps"],
-                        market["liquidity"],
-                        market["end_date"],
-                        market["fetched_at"],
-                    )
-                    if self._is_supported_up_down_market(market.get("market_name", "")):
-                        # FairValue engine runs for every up/down market, every mode.
-                        self._evaluate_fair_value_arb(market, market_id, market_symbol)
-                        if self.mode == "arbitrage":
-                            self._evaluate_arbitrage(market, market_id, market_symbol)
-                        elif self.mode == "signal":
-                            if not current_signal:
-                                continue
-                            self._evaluate_signal(
-                                market,
-                                market_id,
-                                current_signal,
-                                market_symbol,
-                            )
-                        # 'both' mode: run arbitrage first, then signal as secondary
-                        elif self.mode == "both":
-                            self._evaluate_arbitrage(market, market_id, market_symbol)
-                            if not current_signal:
-                                continue
-                            self._evaluate_signal(
-                                market,
-                                market_id,
-                                current_signal,
-                                market_symbol,
-                            )
-
-                self.last_processed_market_timestamp = datetime.utcnow().isoformat()
-                self.db.set_bot_state(
-                    "last_processed_market_timestamp",
-                    self.last_processed_market_timestamp,
-                )
-            except Exception as exc:
-                self._log(f"Polymarket polling error: {exc}", level="ERROR")
-            time.sleep(interval)
+            time.sleep(1)
 
     # ── Lifecycle ────────────────────────────────────────────────────────────────
 
@@ -2241,20 +2402,15 @@ class TradingBot:
             daemon=True,
             name="BinancePoller",
         )
-        self._poly_thread = threading.Thread(
-            target=self._poll_polymarket,
-            daemon=True,
-            name="PolymarketPoller",
-        )
+        self._poly_thread = None
         self._hl_thread = threading.Thread(
             target=self._poll_hyperliquid,
             daemon=True,
             name="HyperliquidPoller",
         )
         self._binance_thread.start()
-        self._poly_thread.start()
         self._hl_thread.start()
-        self._log("All polling threads started.")
+        self._log("Polling threads started (Binance + Hyperliquid).")
 
     def stop(self):
         """Signal both polling threads to exit and update bot status."""

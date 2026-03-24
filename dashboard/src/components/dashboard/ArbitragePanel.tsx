@@ -15,9 +15,9 @@ interface Props {
 }
 
 const typeTone = (arbType: string) => {
-  if (arbType === "model_vs_market") return "text-[hsl(280,60%,65%)] bg-[hsl(280,60%,55%,0.10)]";
-  if (arbType === "yes_no_sum") return "text-warning bg-warning/10";
-  if (arbType === "cross_venue") return "text-[hsl(210,75%,65%)] bg-[hsl(210,75%,55%,0.10)]";
+  if (arbType === "funding_arb") return "text-[hsl(280,60%,65%)] bg-[hsl(280,60%,55%,0.10)]";
+  if (arbType === "basis_arb") return "text-warning bg-warning/10";
+  if (arbType === "volatility") return "text-[hsl(210,75%,65%)] bg-[hsl(210,75%,55%,0.10)]";
   return "text-muted-foreground bg-muted";
 };
 
@@ -48,9 +48,9 @@ export function ArbitragePanel({
             className="rounded-md border border-border bg-secondary/40 px-2 py-1 font-mono text-[10px] text-foreground"
           >
             <option value="ALL">All types</option>
-            <option value="model_vs_market">model_vs_market</option>
-            <option value="yes_no_sum">yes_no_sum</option>
-            <option value="cross_venue">cross_venue</option>
+            <option value="funding_arb">funding_arb</option>
+            <option value="basis_arb">basis_arb</option>
+            <option value="volatility">volatility</option>
           </select>
           <select
             value={status}

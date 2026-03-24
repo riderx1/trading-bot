@@ -3,7 +3,7 @@ api.py - FastAPI REST server for the trading bot dashboard.
 
 Endpoints:
   GET /status   → bot status, uptime, thread health
-  GET /markets  → latest Polymarket YES/NO price snapshots
+    GET /markets  → deprecated (Polymarket disabled)
   GET /signals  → latest Binance BTC trend signals
   GET /trades   → trade history (paper or live)
   GET /logs     → application log entries
@@ -17,14 +17,16 @@ Run:
 """
 
 import json
-import re
+import io
+import csv
 from datetime import datetime
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 
+from backtest import BacktestManager, BacktestResultsStore
 from bot import TradingBot
 from db import Database
 from ta_scanner import TechnicalScanner
@@ -39,7 +41,7 @@ SYMBOL_KEYWORDS = {
 
 app = FastAPI(
     title="Trading Bot API",
-    description="REST API for the Polymarket crypto trading bot.",
+    description="REST API for the Hyperliquid paper trading bot.",
     version="0.1.0",
 )
 
@@ -59,33 +61,24 @@ bot = TradingBot()
 db = Database()
 scanner = TechnicalScanner(bot.config)
 bot.attach_scanner(scanner)
+backtest_store = BacktestResultsStore()
+backtest_manager = BacktestManager(backtest_store)
 _start_time = datetime.utcnow()
 
 
 def _strategy_to_venue(strategy: str) -> str:
-    key = str(strategy or "").strip().lower()
-    polymarket_strategies = {"yes_no", "arbitrage", "polymarket_scalp"}
-    if key in polymarket_strategies:
-        return "polymarket"
     return "hyperliquid"
 
 
 def _group_wallets_by_venue(snapshot: dict, cfg: dict) -> dict:
     bots = snapshot.get("bots", {}) if isinstance(snapshot, dict) else {}
     wallet_cfg = cfg.get("paper_wallets", {}) if isinstance(cfg, dict) else {}
-    polymarket_cfg = wallet_cfg.get("polymarket", {}) if isinstance(wallet_cfg, dict) else {}
     hyperliquid_cfg = wallet_cfg.get("hyperliquid", {}) if isinstance(wallet_cfg, dict) else {}
 
     grouped = {
-        "polymarket": {},
         "hyperliquid": {},
     }
 
-    for label, balance in polymarket_cfg.items():
-        grouped["polymarket"][label] = {
-            "balance": float(balance or 0.0),
-            "pnl": 0.0,
-        }
     for label, balance in hyperliquid_cfg.items():
         grouped["hyperliquid"][label] = {
             "balance": float(balance or 0.0),
@@ -146,7 +139,7 @@ def get_status(symbol: str = Query(default="BTCUSDT")):
       paper_trading           — true if no real funds are used
       uptime_seconds          — seconds since the API server started
       binance_thread_alive    — whether the Binance polling thread is active
-      polymarket_thread_alive — whether the Polymarket polling thread is active
+    hyperliquid_thread_alive — whether the Hyperliquid polling thread is active
     """
     uptime = (datetime.utcnow() - _start_time).total_seconds()
     target_symbol = (symbol or "BTCUSDT").upper()
@@ -168,7 +161,7 @@ def get_status(symbol: str = Query(default="BTCUSDT")):
         "symbol": target_symbol,
         "supported_symbols": bot.supported_symbols,
         "signal_intervals": bot.signal_intervals,
-        "market_focus": bot.polymarket.focus_keywords,
+        "market_focus": [],
         "latest_signal": latest_signal,
         "latest_perp_context": latest_perp_context,
         "latest_micro_data": latest_micro_data,
@@ -186,11 +179,7 @@ def get_status(symbol: str = Query(default="BTCUSDT")):
             else False
         ),
         "binance_threads_alive": {sym: (bot._binance_thread.is_alive() if bot._binance_thread is not None else False) for sym in bot.supported_symbols},
-        "polymarket_thread_alive": (
-            bot._poly_thread.is_alive()
-            if bot._poly_thread is not None
-            else False
-        ),
+        "polymarket_thread_alive": False,
         "hyperliquid_thread_alive": (
             bot._hl_thread.is_alive()
             if getattr(bot, "_hl_thread", None) is not None
@@ -285,7 +274,7 @@ def get_active_paper_trades(
         normalized_open = [
             {
                 "trade_type": "single",
-                "venue": row.get("venue") or "polymarket",
+                "venue": row.get("venue") or "hyperliquid",
                 "symbol": str(row.get("symbol") or ""),
                 "strategy": str(row.get("strategy") or ""),
                 "direction": int(row.get("direction") or 0),
@@ -462,61 +451,23 @@ def get_history_trades(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.get("/markets", summary="Latest Polymarket price snapshots")
+@app.get("/markets", summary="Deprecated endpoint (Polymarket disabled)")
 def get_markets(
     limit: int = Query(default=50, ge=1, le=500, description="Max rows to return"),
     symbol: str = Query(default="BTCUSDT", description="Trading symbol filter"),
 ):
     """
-    Return the most recent YES/NO price snapshots from Polymarket.
+    Deprecated endpoint retained for backward compatibility.
 
     Query params:
       limit — max number of rows (1–500, default 50)
     """
     try:
-        target_symbol = (symbol or "BTCUSDT").upper()
-        symbol_keywords = SYMBOL_KEYWORDS.get(target_symbol, SYMBOL_KEYWORDS["BTCUSDT"])
-        markets = db.get_latest_markets(limit=limit * 5)
-        filtered_markets = [
-            market
-            for market in markets
-            if bot.polymarket.is_relevant_market(market.get("market_name", ""))
-            and any(
-                re.search(
-                    rf"\\b{re.escape(keyword)}\\b",
-                    market.get("market_name", "").lower(),
-                )
-                for keyword in symbol_keywords
-            )
-        ]
-
-        # Keep only the newest row per market_name to avoid repeated snapshots.
-        deduped_markets = []
-        seen_names = set()
-        for market in filtered_markets:
-            name = market.get("market_name", "")
-            if name in seen_names:
-                continue
-            seen_names.add(name)
-            deduped_markets.append(market)
-            if len(deduped_markets) >= limit:
-                break
-
-        # Fallback: if there are no symbol-matching markets, return latest crypto
-        # markets so the dashboard still shows active Polymarket pairs.
-        if not deduped_markets:
-            for market in markets:
-                name = market.get("market_name", "")
-                if name in seen_names:
-                    continue
-                if not bot.polymarket.is_relevant_market(name):
-                    continue
-                seen_names.add(name)
-                deduped_markets.append(market)
-                if len(deduped_markets) >= limit:
-                    break
-
-        return {"markets": deduped_markets}
+        return {
+            "markets": [],
+            "deprecated": True,
+            "message": "Polymarket market feed has been removed in Hyperliquid-only mode.",
+        }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -731,11 +682,7 @@ def get_dependency_health():
             sym: (bot._binance_thread.is_alive() if bot._binance_thread is not None else False)
             for sym in bot.supported_symbols
         },
-        "polymarket_thread_alive": (
-            bot._poly_thread.is_alive()
-            if bot._poly_thread is not None
-            else False
-        ),
+        "polymarket_thread_alive": False,
         "hyperliquid_thread_alive": (
             bot._hl_thread.is_alive()
             if getattr(bot, "_hl_thread", None) is not None
@@ -784,6 +731,146 @@ def get_ta_status():
         "timeframes": scanner.timeframes,
         "exchanges": list(scanner._exchanges.keys()),
     }
+
+
+@app.post("/backtest/run", summary="Queue a paper-only historical backtest")
+def run_backtest(payload: dict):
+    required = [
+        "symbol",
+        "timeframe",
+        "start_ts",
+        "end_ts",
+    ]
+    missing = [key for key in required if key not in payload or payload.get(key) in (None, "")]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Missing required fields: {', '.join(missing)}")
+
+    try:
+        run_id = backtest_manager.queue_run(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return {
+        "run_id": run_id,
+        "status": "queued",
+    }
+
+
+@app.get("/backtest/status/{run_id}", summary="Get backtest run status")
+def get_backtest_status(run_id: str):
+    payload = backtest_manager.get_status(run_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Backtest run not found")
+    return payload
+
+
+@app.get("/backtest/result/{run_id}", summary="Get complete backtest report")
+def get_backtest_result(run_id: str):
+    report = backtest_store.get_full_report(run_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Backtest run not found")
+    return report
+
+
+@app.get("/backtest/runs", summary="List backtest runs")
+def list_backtest_runs(
+    limit: int = Query(default=25, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    try:
+        rows = backtest_store.list_runs(limit=limit, offset=offset)
+        return {
+            "runs": rows,
+            "pagination": {
+                "limit": limit,
+                "offset": offset,
+                "returned": len(rows),
+            },
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/backtest/cancel/{run_id}", summary="Request cooperative backtest cancellation")
+def cancel_backtest(run_id: str):
+    cancelled = backtest_manager.cancel_run(run_id)
+    if not cancelled:
+        raise HTTPException(status_code=404, detail="Backtest run is not active")
+    return {
+        "status": "cancellation_requested",
+        "run_id": run_id,
+    }
+
+
+@app.get("/backtest/export/{run_id}", summary="Export backtest results as CSV")
+def export_backtest(run_id: str, format: str = Query(default="csv")):
+    report = backtest_store.get_full_report(run_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Backtest run not found")
+
+    if format not in {"csv", "equity_csv"}:
+        raise HTTPException(status_code=400, detail="Unsupported format. Use csv or equity_csv")
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+
+    if format == "csv":
+        writer.writerow(
+            [
+                "timestamp",
+                "symbol",
+                "strategy",
+                "venue",
+                "arb_type",
+                "side",
+                "entry_price",
+                "exit_price",
+                "size",
+                "pnl",
+                "exit_reason",
+                "duration_min",
+            ]
+        )
+        for row in report.get("trades", []):
+            hold_seconds = float(row.get("hold_seconds") or 0.0)
+            writer.writerow(
+                [
+                    row.get("ts") or row.get("timestamp") or "",
+                    row.get("symbol") or "",
+                    row.get("strategy") or "",
+                    row.get("venue") or "",
+                    row.get("arb_type") or "",
+                    row.get("side") or "",
+                    row.get("entry_price") or "",
+                    row.get("exit_price") or "",
+                    row.get("qty") or "",
+                    row.get("pnl") or "",
+                    row.get("exit_reason") or row.get("note") or "",
+                    round(hold_seconds / 60.0, 4),
+                ]
+            )
+        filename = f"backtest_trades_{run_id}.csv"
+    else:
+        drawdown_by_ts = {
+            str(item.get("timestamp") or ""): item.get("drawdown_pct")
+            for item in report.get("drawdown_curve", [])
+        }
+        writer.writerow(["timestamp", "value", "drawdown_pct"])
+        for row in report.get("equity_curve", []):
+            ts = str(row.get("timestamp") or "")
+            writer.writerow([
+                ts,
+                row.get("value") or "",
+                drawdown_by_ts.get(ts, ""),
+            ])
+        filename = f"backtest_equity_{run_id}.csv"
+
+    csv_payload = buf.getvalue()
+    return Response(
+        content=csv_payload,
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 # ── Run ────────────────────────────────────────────────────────────────────────

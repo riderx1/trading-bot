@@ -16,18 +16,18 @@ class RiskEngine:
         self.max_per_market_exposure = float(cfg["max_per_market_exposure_usdc"])
         self.max_cluster_exposure = float(cfg["max_cluster_exposure_usdc"])
         risk_cfg = cfg.get("risk", {}) or {}
-        pm_cfg = risk_cfg.get("polymarket", {}) or {}
         hl_cfg = risk_cfg.get("hyperliquid", {}) or {}
+        pm_cfg = risk_cfg.get("polymarket", {}) or {}
         self._venue_limits: dict[str, dict[str, float]] = {
-            "polymarket": {
-                "max_total_exposure_usdc": float(pm_cfg.get("max_portfolio_exposure_usdc", self.max_total_exposure)),
-                "max_per_market_exposure_usdc": float(pm_cfg.get("max_per_market_usdc", self.max_per_market_exposure)),
-                "max_cluster_exposure_usdc": float(pm_cfg.get("max_portfolio_exposure_usdc", self.max_cluster_exposure)),
-            },
             "hyperliquid": {
                 "max_total_exposure_usdc": float(hl_cfg.get("max_portfolio_exposure_usdc", self.max_total_exposure)),
                 "max_per_market_exposure_usdc": float(hl_cfg.get("max_per_market_usdc", self.max_per_market_exposure)),
                 "max_cluster_exposure_usdc": float(hl_cfg.get("max_portfolio_exposure_usdc", self.max_cluster_exposure)),
+            },
+            "polymarket": {
+                "max_total_exposure_usdc": float(pm_cfg.get("max_portfolio_exposure_usdc", self.max_total_exposure)),
+                "max_per_market_exposure_usdc": float(pm_cfg.get("max_per_market_usdc", self.max_per_market_exposure)),
+                "max_cluster_exposure_usdc": float(pm_cfg.get("max_portfolio_exposure_usdc", self.max_cluster_exposure)),
             },
         }
         # Per-arb-type position size caps.
@@ -46,11 +46,11 @@ class RiskEngine:
         market_exposure_usdc: float,
         cluster_exposure_usdc: float,
         order_notional_usdc: float,
-        venue: str = "polymarket",
+        venue: str = "hyperliquid",
     ) -> RiskResult:
         if self.execution_mode != "paper":
             return RiskResult(False, "risk_mode_not_paper")
-        active = self._venue_limits.get(str(venue), self._venue_limits["polymarket"])
+        active = self._venue_limits.get(str(venue), self._venue_limits["hyperliquid"])
         if total_exposure_usdc + order_notional_usdc > float(active["max_total_exposure_usdc"]):
             return RiskResult(False, "risk_limit_total_exposure")
         if market_exposure_usdc + order_notional_usdc > float(active["max_per_market_exposure_usdc"]):
@@ -65,7 +65,7 @@ class RiskEngine:
         market_exposure_usdc: float,
         cluster_exposure_usdc: float,
         order_notional_usdc: float,
-        venue: str = "polymarket",
+        venue: str = "hyperliquid",
     ) -> RiskResult:
         return self.can_open_position(
             total_exposure_usdc,
@@ -86,7 +86,7 @@ class RiskEngine:
         market_exposure_usdc: float,
         cluster_exposure_usdc: float,
         order_notional_usdc: float,
-        venue: str = "polymarket",
+        venue: str = "hyperliquid",
     ) -> RiskResult:
         """
         Check whether an arbitrage position can be opened.

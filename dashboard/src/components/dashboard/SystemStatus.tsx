@@ -16,7 +16,6 @@ export function SystemStatus({ status, isLoading, isError }: Props) {
 
   const threads = [
     { label: "Binance", alive: status?.binance_thread_alive },
-    { label: "Polymarket", alive: status?.polymarket_thread_alive },
     { label: "Hyperliquid", alive: status?.hyperliquid_thread_alive },
     { label: "TA Scanner", alive: status?.ta_scanner_thread_alive },
   ];

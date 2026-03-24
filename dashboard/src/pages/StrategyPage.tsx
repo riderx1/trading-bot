@@ -35,7 +35,6 @@ export default function StrategyPage() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="ALL">All venues</SelectItem>
-              <SelectItem value="polymarket">Polymarket</SelectItem>
               <SelectItem value="hyperliquid">Hyperliquid</SelectItem>
             </SelectContent>
           </Select>

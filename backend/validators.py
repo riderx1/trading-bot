@@ -96,6 +96,10 @@ def validate_config(cfg: dict):
     if not isinstance(cfg["trading"]["emit_signals_only"], bool):
         raise ValueError("trading.emit_signals_only must be true or false")
 
+    hyperliquid_cfg = cfg.get("hyperliquid", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(hyperliquid_cfg.get("symbols", []), list) or not hyperliquid_cfg.get("symbols"):
+        raise ValueError("hyperliquid.symbols must be a non-empty list")
+
 
 def validate_binance_price_payload(payload: dict):
     if not isinstance(payload, dict) or "price" not in payload:
@@ -117,11 +121,10 @@ def validate_binance_klines_payload(payload: list):
 
 
 def validate_polymarket_market_item(item: dict):
+    """Backward-compatible validator stub for legacy market payloads.
+
+    Polymarket feed is deprecated, but this validator remains to keep legacy
+    import paths and optional code branches safe during migration.
+    """
     if not isinstance(item, dict):
-        raise ValueError("Invalid Polymarket market item")
-    if not item.get("question") and not item.get("slug"):
-        raise ValueError("Polymarket market missing question/slug")
-    if "conditionId" not in item:
-        raise ValueError("Polymarket market missing conditionId")
-    if "outcomes" not in item or "outcomePrices" not in item:
-        raise ValueError("Polymarket market missing outcomes/outcomePrices")
+        raise ValueError("Invalid market item")

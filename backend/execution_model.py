@@ -26,6 +26,9 @@ def evaluate_execution(
     cfg: dict,
     order_notional_usdc: float | None = None,
 ) -> dict:
+    normalized_side = str(side or "").strip().upper()
+    is_buy_side = normalized_side in {"YES", "BUY", "LONG"}
+
     spread_bps = _to_float(market.get("spread_bps"), 0.0)
     liquidity = _to_float(market.get("liquidity"), 0.0)
     max_spread_bps = float(cfg["max_spread_bps"])
@@ -45,9 +48,30 @@ def evaluate_execution(
 
     slippage_bps = float(cfg["slippage_bps"])
 
+    mark_price = _to_float(market.get("mark_price"), 0.0)
+    best_bid = _to_float(market.get("best_bid"), 0.0)
     best_ask = _to_float(market.get("best_ask"), 0.0)
-    fallback_ask = _to_float(market["yes_ask"] if side == "YES" else market["no_ask"], 0.0)
-    base_price = best_ask if best_ask > 0 else fallback_ask
+
+    fallback_ask = _to_float(
+        market.get("ask")
+        or market.get("yes_ask")
+        or market.get("yes_price")
+        or mark_price,
+        0.0,
+    )
+    fallback_bid = _to_float(
+        market.get("bid")
+        or market.get("no_ask")
+        or market.get("no_price")
+        or mark_price,
+        0.0,
+    )
+
+    if is_buy_side:
+        base_price = best_ask if best_ask > 0 else fallback_ask
+    else:
+        base_price = best_bid if best_bid > 0 else fallback_bid
+
     if base_price <= 0:
         return {"allowed": False, "reason_code": "invalid_price"}
 
@@ -60,7 +84,11 @@ def evaluate_execution(
         impact_bps = min(max_impact_bps, (notional / liquidity) * 10000.0 * impact_factor)
 
     effective_slippage_bps = slippage_bps + impact_bps
-    exec_price = base_price * (1.0 + (effective_slippage_bps / 10000.0))
+    exec_price = (
+        base_price * (1.0 + (effective_slippage_bps / 10000.0))
+        if is_buy_side
+        else base_price * (1.0 - (effective_slippage_bps / 10000.0))
+    )
 
     return {
         "allowed": True,

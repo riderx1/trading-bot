@@ -10,6 +10,7 @@ import Index from "./pages/Index";
 import BotsPage from "./pages/BotsPage";
 import StrategyPage from "./pages/StrategyPage";
 import HistoryPage from "./pages/HistoryPage";
+import BacktestPage from "./pages/BacktestPage";
 import WalletPage from "./pages/WalletPage";
 import DiagnosticsPage from "./pages/DiagnosticsPage";
 import NotFound from "./pages/NotFound";
@@ -71,6 +72,7 @@ const App = () => (
                 <Route path="/bots" element={<BotsPage />} />
                 <Route path="/strategy" element={<StrategyPage />} />
                 <Route path="/history" element={<HistoryPage />} />
+                <Route path="/backtest" element={<BacktestPage />} />
                 <Route path="/wallet" element={<WalletPage />} />
                 <Route path="/diagnostics" element={<DiagnosticsPage />} />
               </Route>

@@ -116,11 +116,12 @@ class PolymarketPaperClient(PaperExecutionClient):
     instrument = "prediction_market"
 
     def submit(self, trade_intent: dict[str, Any], market: dict) -> ExecutionResult:
-        assert str(self.trading_cfg.get("execution_mode", "paper")).strip().lower() == "paper", (
-            "SAFETY: execution_mode must be 'paper'. Refusing to submit trade."
-        )
-        assert trade_intent.get("venue") == "polymarket"
-        return super().submit(trade_intent=trade_intent, market=market)
+        # Polymarket execution is intentionally disabled in Hyperliquid-only mode.
+        return ExecutionResult(accepted=False, reason_code="venue_disabled_polymarket")
+
+    def execute_binary_market_order(self, request: ExecutionRequest, market: dict) -> ExecutionResult:
+        # Keep this explicit to block any direct calls that bypass submit().
+        return ExecutionResult(accepted=False, reason_code="venue_disabled_polymarket")
 
 
 class HyperliquidPaperClient(PaperExecutionClient):
@@ -141,7 +142,7 @@ def build_execution_client(mode: str, db, trading_cfg: dict) -> ExecutionClient:
         raise ValueError(
             f"Unsupported execution mode '{mode}'. Only 'paper' mode is allowed."
         )
-    return PolymarketPaperClient(db=db, trading_cfg=trading_cfg)
+    return HyperliquidPaperClient(db=db, trading_cfg=trading_cfg)
 
 
 def build_paper_execution_clients(mode: str, db, trading_cfg: dict) -> tuple[PolymarketPaperClient, HyperliquidPaperClient]:

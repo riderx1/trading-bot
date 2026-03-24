@@ -137,12 +137,12 @@
     "enabled": true,
     "paper_wallet": {
       "enabled": true,
-      "balance_per_bot_usdc": 10.0,
+      "balance_per_bot_usdc": 14.0,
       "min_notional_usdc": 0.5,
       "max_position_per_trade_usdc": 3.0,
       "min_edge_for_position": 0.0005,
       "slippage_bps": 8.0,
-      "strategies": ["momentum", "ta_confluence", "reversal", "yes_no", "model_vs_market", "cross_venue", "scalping"]
+      "strategies": ["trend", "momentum", "ta_confluence", "reversal", "breakout", "mean_reversion", "funding_arb", "basis_arb", "volatility", "scalping"]
     },
     "exit_rules": {
       "time_windows_seconds": [3600, 14400, 86400],
@@ -153,31 +153,24 @@
   },
 
   "paper_wallets": {
-    "polymarket": {
-      "arbitrage": 10.0,
-      "polymarket_scalp": 10.0
-    },
     "hyperliquid": {
-      "trend": 10.0,
-      "ta": 10.0,
-      "reversal": 10.0,
-      "model": 10.0,
-      "perp_arb": 10.0,
-      "hyperliquid_scalp": 10.0
+      "trend": 14.0,
+      "momentum": 14.0,
+      "ta_confluence": 14.0,
+      "reversal": 14.0,
+      "breakout": 14.0,
+      "mean_reversion": 14.0,
+      "funding_arb": 14.0,
+      "basis_arb": 14.0,
+      "volatility": 14.0,
+      "scalping": 14.0
     }
   },
 
   "risk": {
-    "polymarket": {
-      "max_portfolio_exposure_usdc": 40,
-      "max_per_market_usdc": 10,
-      "min_liquidity_usdc": 1000,
-      "max_spread_bps": 250,
-      "cooldown_seconds": 900
-    },
     "hyperliquid": {
-      "max_portfolio_exposure_usdc": 60,
-      "max_per_market_usdc": 15,
+      "max_portfolio_exposure_usdc": 140,
+      "max_per_market_usdc": 28,
       "max_leverage": 3,
       "min_liquidity_usdc": 5000,
       "max_spread_bps": 50,

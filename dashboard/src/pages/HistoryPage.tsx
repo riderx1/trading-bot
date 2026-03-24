@@ -3,23 +3,29 @@ import { useHistorySignals, useHistoryOpportunities, useHistoryTrades, useLogs }
 import { useSymbol } from "@/contexts/SymbolContext";
 
 const STRATEGY_TYPE: Record<string, "directional" | "arbitrage"> = {
+  trend: "directional",
   momentum: "directional",
-  reversal: "directional",
   ta_confluence: "directional",
-  model_vs_market: "directional",
+  reversal: "directional",
+  breakout: "directional",
+  mean_reversion: "directional",
+  volatility: "directional",
   scalping: "directional",
-  yes_no: "arbitrage",
-  cross_venue: "arbitrage",
+  funding_arb: "arbitrage",
+  basis_arb: "arbitrage",
 };
 
 const BOT_TO_STRATEGY: Record<string, string> = {
-  TrendBot: "momentum",
-  ReversalBot: "reversal",
+  TrendBot: "trend",
+  MomentumBot: "momentum",
   TABot: "ta_confluence",
-  ModelVsMarketBot: "model_vs_market",
+  ReversalBot: "reversal",
+  BreakoutBot: "breakout",
+  MeanRevBot: "mean_reversion",
+  VolatilityBot: "volatility",
   ScalperBot: "scalping",
-  ArbitrageBot: "yes_no",
-  PerpArbBot: "cross_venue",
+  FundingArbBot: "funding_arb",
+  BasisArbBot: "basis_arb",
 };
 
 export default function HistoryPage() {
@@ -88,8 +94,8 @@ export default function HistoryPage() {
 
       <div className="grid gap-3 rounded-lg border border-border bg-card p-4 md:grid-cols-5 xl:grid-cols-6">
         <FilterSelect label="Symbol" value={symbol} onChange={setSymbol} options={symbols} />
-        <FilterSelect label="Strategy" value={strategy} onChange={setStrategy} options={["ALL", "momentum", "reversal", "ta_confluence", "model_vs_market", "scalping", "yes_no", "cross_venue"]} />
-        <FilterSelect label="Bot" value={bot} onChange={setBot} options={["ALL", "TrendBot", "ReversalBot", "TABot", "ModelVsMarketBot", "ScalperBot", "ArbitrageBot", "PerpArbBot"]} />
+        <FilterSelect label="Strategy" value={strategy} onChange={setStrategy} options={["ALL", "trend", "momentum", "ta_confluence", "reversal", "breakout", "mean_reversion", "volatility", "scalping", "funding_arb", "basis_arb"]} />
+        <FilterSelect label="Bot" value={bot} onChange={setBot} options={["ALL", "TrendBot", "MomentumBot", "TABot", "ReversalBot", "BreakoutBot", "MeanRevBot", "VolatilityBot", "ScalperBot", "FundingArbBot", "BasisArbBot"]} />
         <FilterSelect label="Type" value={tradeType} onChange={setTradeType} options={["ALL", "directional", "arbitrage"]} />
         <FilterSelect label="Timeframe" value={timeframe} onChange={setTimeframe} options={["ALL", "scalp", "5m", "15m", "1h", "4h", "1d", "consensus"]} />
         <FilterSelect label="Outcome" value={outcome} onChange={setOutcome} options={["ALL", "win", "loss", "flat"]} />

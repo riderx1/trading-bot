@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 
 export function useStatus(symbol?: string) {
@@ -161,5 +161,46 @@ export function useHistoryTrades(params: Record<string, string>) {
     queryFn: () => api.getHistoryTrades(params),
     refetchInterval: 30000,
     retry: 2,
+  });
+}
+
+export function useBacktestRuns(limit = 25, offset = 0) {
+  return useQuery({
+    queryKey: ["backtest-runs", limit, offset],
+    queryFn: () => api.listBacktestRuns(limit, offset),
+    refetchInterval: 10000,
+    retry: 2,
+  });
+}
+
+export function useBacktestStatus(runId?: string) {
+  return useQuery({
+    queryKey: ["backtest-status", runId],
+    queryFn: () => api.getBacktestStatus(String(runId)),
+    enabled: Boolean(runId),
+    refetchInterval: 3000,
+    retry: 2,
+  });
+}
+
+export function useBacktestResult(runId?: string) {
+  return useQuery({
+    queryKey: ["backtest-result", runId],
+    queryFn: () => api.getBacktestResult(String(runId)),
+    enabled: Boolean(runId),
+    refetchInterval: 10000,
+    retry: 2,
+  });
+}
+
+export function useRunBacktest() {
+  return useMutation({
+    mutationFn: api.runBacktest,
+  });
+}
+
+export function useCancelBacktest() {
+  return useMutation({
+    mutationFn: api.cancelBacktest,
   });
 }

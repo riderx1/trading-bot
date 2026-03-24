@@ -8,7 +8,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
-import { Activity, Bot, BarChart3, Clock, Wallet, Stethoscope } from "lucide-react";
+import { Activity, Bot, BarChart3, Clock, Wallet, Stethoscope, FlaskConical } from "lucide-react";
 import type { TradingSymbol } from "@/contexts/SymbolContext";
 
 const NAV_ITEMS = [
@@ -16,6 +16,7 @@ const NAV_ITEMS = [
   { to: "/bots", label: "Bots", icon: Bot },
   { to: "/strategy", label: "Strategy", icon: BarChart3 },
   { to: "/history", label: "History", icon: Clock },
+  { to: "/backtest", label: "Backtesting", icon: FlaskConical },
   { to: "/wallet", label: "Wallet", icon: Wallet },
   { to: "/diagnostics", label: "Diagnostics", icon: Stethoscope },
 ];
