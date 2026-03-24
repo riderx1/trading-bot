@@ -57,7 +57,7 @@ export function BotOrchestra({ decision, rankings }: Props) {
               <div key={ranking.strategy} className="rounded-lg border border-border bg-secondary/25 px-3 py-3">
                 <div className="flex items-center justify-between gap-3">
                   <div>
-                    <p className="font-mono text-xs text-foreground">{ranking.strategy.replaceAll("_", " ")}</p>
+                    <p className="font-mono text-xs text-foreground">{ranking.strategy.replace(/_/g, " ")}</p>
                     <p className="mt-1 font-mono text-[10px] text-muted-foreground">Winrate {Math.round((ranking.win_rate ?? 0) * 100)}%</p>
                   </div>
                   <span className="font-mono text-sm font-semibold text-foreground">{Math.round((ranking.overall_score ?? 0) * 100)}</span>

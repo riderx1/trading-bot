@@ -20,7 +20,7 @@ function maxValue(values: number[]): number {
 }
 
 function prettyLabel(label: string): string {
-  return label.replaceAll("_", " ");
+  return label.replace(/_/g, " ");
 }
 
 export function CalibrationDiagnosticsPanel({ diagnostics, isLoading, isError }: Props) {

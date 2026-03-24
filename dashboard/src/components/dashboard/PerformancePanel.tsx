@@ -33,7 +33,7 @@ export function PerformancePanel({ performance, rankings, recentTrades }: Props)
 
         <div className="rounded-xl border border-border bg-secondary/20 p-4">
           <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">Best Strategy</p>
-          <p className="mt-3 font-mono text-lg font-semibold text-foreground">{bestStrategy ? bestStrategy.strategy.replaceAll("_", " ") : "No data"}</p>
+          <p className="mt-3 font-mono text-lg font-semibold text-foreground">{bestStrategy ? bestStrategy.strategy.replace(/_/g, " ") : "No data"}</p>
           <div className="mt-4 grid gap-3">
             <MetricCard icon={TrendingUp} label="Score" value={bestStrategy ? `${Math.round((bestStrategy.overall_score ?? 0) * 100)}` : "0"} />
             <MetricCard icon={Activity} label="Avg Return" value={bestStrategy ? `$${(bestStrategy.avg_pnl ?? 0).toFixed(2)}` : "$0.00"} color={(bestStrategy?.avg_pnl ?? 0) >= 0 ? "text-bullish" : "text-bearish"} />
