@@ -57,6 +57,11 @@
     "mode": "paper"
   },
 
+  "capital_allocation": {
+    "directional": 0.7,
+    "arbitrage": 0.3
+  },
+
   "trading": {
     "paper_trading": true,
     "mode": "signal",
@@ -77,6 +82,8 @@
     "ta_alignment_boost": 0.05,
     "ta_conflict_penalty": 0.08,
     "confidence_cap": 0.75,
+    "confidence_density_threshold": 12.0,
+    "confidence_density_window_minutes": 30,
     "low_sample_threshold": 25,
     "low_sample_penalty": 0.12,
     "medium_horizon_conf_multiplier": 0.65,
@@ -133,7 +140,8 @@
       "min_notional_usdc": 1.0,
       "max_position_per_trade_usdc": 3.0,
       "min_edge_for_position": 0.001,
-      "strategies": ["momentum_trend", "ta_confluence", "reversal_fade", "arbitrage", "model_vs_market", "perp_arb"]
+      "slippage_bps": 8.0,
+      "strategies": ["momentum", "ta_confluence", "reversal", "yes_no", "model_vs_market", "cross_venue", "scalping"]
     },
     "exit_rules": {
       "time_windows_seconds": [3600, 14400, 86400],

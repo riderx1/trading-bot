@@ -18,6 +18,8 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
+from strategy_taxonomy import normalize_strategy, strategy_aliases
+
 logger = logging.getLogger(__name__)
 
 
@@ -79,6 +81,31 @@ class Database:
         self._ensure_column(conn, "opportunities", "strategy", "TEXT")
         self._ensure_column(conn, "opportunities", "symbol", "TEXT")
         self._ensure_column(conn, "trades", "reason_code", "TEXT")
+
+        # Canonical strategy taxonomy migration.
+        conn.execute("UPDATE signals SET strategy='momentum' WHERE strategy='momentum_trend'")
+        conn.execute("UPDATE signals SET strategy='reversal' WHERE strategy='reversal_fade'")
+        conn.execute("UPDATE signals SET strategy='yes_no' WHERE strategy='arbitrage'")
+        conn.execute("UPDATE signals SET strategy='cross_venue' WHERE strategy='perp_arb'")
+
+        conn.execute("UPDATE opportunities SET strategy='momentum' WHERE strategy='momentum_trend'")
+        conn.execute("UPDATE opportunities SET strategy='reversal' WHERE strategy='reversal_fade'")
+        conn.execute("UPDATE opportunities SET strategy='yes_no' WHERE strategy='arbitrage'")
+        conn.execute("UPDATE opportunities SET strategy='cross_venue' WHERE strategy='perp_arb'")
+
+        conn.execute("UPDATE trades_simulated SET strategy='momentum' WHERE strategy='momentum_trend'")
+        conn.execute("UPDATE trades_simulated SET strategy='reversal' WHERE strategy='reversal_fade'")
+        conn.execute("UPDATE trades_simulated SET strategy='yes_no' WHERE strategy='arbitrage'")
+        conn.execute("UPDATE trades_simulated SET strategy='cross_venue' WHERE strategy='perp_arb'")
+
+        conn.execute("DELETE FROM strategy_performance WHERE strategy='momentum_trend' AND EXISTS (SELECT 1 FROM strategy_performance sp WHERE sp.strategy='momentum')")
+        conn.execute("DELETE FROM strategy_performance WHERE strategy='reversal_fade' AND EXISTS (SELECT 1 FROM strategy_performance sp WHERE sp.strategy='reversal')")
+        conn.execute("DELETE FROM strategy_performance WHERE strategy='arbitrage' AND EXISTS (SELECT 1 FROM strategy_performance sp WHERE sp.strategy='yes_no')")
+        conn.execute("DELETE FROM strategy_performance WHERE strategy='perp_arb' AND EXISTS (SELECT 1 FROM strategy_performance sp WHERE sp.strategy='cross_venue')")
+        conn.execute("UPDATE strategy_performance SET strategy='momentum' WHERE strategy='momentum_trend'")
+        conn.execute("UPDATE strategy_performance SET strategy='reversal' WHERE strategy='reversal_fade'")
+        conn.execute("UPDATE strategy_performance SET strategy='yes_no' WHERE strategy='arbitrage'")
+        conn.execute("UPDATE strategy_performance SET strategy='cross_venue' WHERE strategy='perp_arb'")
 
     def _init_tables(self):
         ddl = """
@@ -523,7 +550,7 @@ class Database:
                 (
                     sequence_id,
                     source,
-                    strategy,
+                    normalize_strategy(strategy),
                     timeframe,
                     trend,
                     confidence,
@@ -570,6 +597,96 @@ class Database:
                 ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_signal_density(
+        self,
+        window_minutes: int = 30,
+        symbol: str | None = None,
+        strategy: str | None = None,
+    ) -> int:
+        filters = [
+            "timestamp >= datetime('now', ?)"
+        ]
+        params: list = [f"-{int(max(1, window_minutes))} minutes"]
+
+        if symbol:
+            filters.append("symbol=?")
+            params.append(symbol)
+        if strategy:
+            aliases = strategy_aliases(strategy)
+            filters.append("strategy IN ({})".format(",".join("?" for _ in aliases)))
+            params.extend(aliases)
+
+        query = "SELECT COUNT(*) AS n FROM signals WHERE " + " AND ".join(filters)
+        with self._connect() as conn:
+            row = conn.execute(query, tuple(params)).fetchone()
+        return int(row["n"] or 0) if row else 0
+
+    def get_calibration_diagnostics(self, window_minutes: int = 120) -> dict:
+        window = f"-{int(max(1, window_minutes))} minutes"
+        with self._connect() as conn:
+            confidence_rows = conn.execute(
+                """
+                SELECT
+                    CASE
+                        WHEN confidence < 0.2 THEN '0.0-0.2'
+                        WHEN confidence < 0.4 THEN '0.2-0.4'
+                        WHEN confidence < 0.6 THEN '0.4-0.6'
+                        WHEN confidence < 0.8 THEN '0.6-0.8'
+                        ELSE '0.8-1.0'
+                    END AS bucket,
+                    COUNT(*) AS count
+                FROM signals
+                WHERE timestamp >= datetime('now', ?)
+                GROUP BY bucket
+                ORDER BY bucket
+                """,
+                (window,),
+            ).fetchall()
+
+            edge_rows = conn.execute(
+                """
+                SELECT
+                    CASE
+                        WHEN edge < 0.005 THEN '<0.5%'
+                        WHEN edge < 0.01 THEN '0.5%-1.0%'
+                        WHEN edge < 0.02 THEN '1.0%-2.0%'
+                        ELSE '>2.0%'
+                    END AS bucket,
+                    COUNT(*) AS count
+                FROM opportunities
+                WHERE timestamp >= datetime('now', ?)
+                GROUP BY bucket
+                ORDER BY bucket
+                """,
+                (window,),
+            ).fetchall()
+
+            density_rows = conn.execute(
+                """
+                SELECT COALESCE(strategy, 'unknown') AS strategy, COUNT(*) AS count
+                FROM signals
+                WHERE timestamp >= datetime('now', ?)
+                GROUP BY strategy
+                ORDER BY count DESC
+                """,
+                (window,),
+            ).fetchall()
+
+        by_strategy: dict[str, int] = {}
+        for row in density_rows:
+            key = normalize_strategy(str(row["strategy"]))
+            by_strategy[key] = by_strategy.get(key, 0) + int(row["count"] or 0)
+
+        return {
+            "confidence_distribution": {str(row["bucket"]): int(row["count"] or 0) for row in confidence_rows},
+            "edge_distribution": {str(row["bucket"]): int(row["count"] or 0) for row in edge_rows},
+            "signal_density": {
+                "window_minutes": int(max(1, window_minutes)),
+                "total_signals": int(sum(int(row["count"] or 0) for row in density_rows)),
+                "by_strategy": by_strategy,
+            },
+        }
+
     def insert_opportunity_if_not_exists(
         self,
         opportunity_key: str,
@@ -603,7 +720,7 @@ class Database:
                     market_id,
                     market_name,
                     signal_sequence_id,
-                    strategy,
+                    normalize_strategy(strategy),
                     timeframe,
                     trend,
                     confidence,
@@ -666,7 +783,7 @@ class Database:
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     symbol,
-                    strategy,
+                    normalize_strategy(strategy),
                     float(entry_price),
                     float(exit_price),
                     int(direction),
@@ -699,7 +816,7 @@ class Database:
             params: list[str] = []
             for field, value in filters:
                 clauses.append(f"{field}=?")
-                params.append(value)
+                params.append(normalize_strategy(value) if field == "strategy" else value)
 
             where = " AND ".join(clauses)
             sql = (
@@ -1011,8 +1128,9 @@ class Database:
             filters.append("timeframe=?")
             params.append(timeframe)
         if strategy and strategy != "ALL":
-            filters.append("strategy=?")
-            params.append(strategy)
+            aliases = strategy_aliases(strategy)
+            filters.append("strategy IN ({})".format(",".join("?" for _ in aliases)))
+            params.extend(aliases)
         if start_ts:
             filters.append("timestamp>=?")
             params.append(start_ts)
@@ -1049,8 +1167,9 @@ class Database:
             filters.append("timeframe=?")
             params.append(timeframe)
         if strategy and strategy != "ALL":
-            filters.append("strategy=?")
-            params.append(strategy)
+            aliases = strategy_aliases(strategy)
+            filters.append("strategy IN ({})".format(",".join("?" for _ in aliases)))
+            params.extend(aliases)
         if start_ts:
             filters.append("timestamp>=?")
             params.append(start_ts)
@@ -1083,8 +1202,9 @@ class Database:
             filters.append("symbol=?")
             params.append(symbol)
         if strategy and strategy != "ALL":
-            filters.append("strategy=?")
-            params.append(strategy)
+            aliases = strategy_aliases(strategy)
+            filters.append("strategy IN ({})".format(",".join("?" for _ in aliases)))
+            params.extend(aliases)
         if start_ts:
             filters.append("timestamp>=?")
             params.append(start_ts)

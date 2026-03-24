@@ -1,12 +1,16 @@
-import type { ScalpPerformanceResponse } from "@/lib/api";
+import type { BotDecision, MicroData, ScalpPerformanceResponse } from "@/lib/api";
 
 interface Props {
   performance: ScalpPerformanceResponse | undefined;
+  latestSignal?: BotDecision | null;
+  microData?: MicroData | null;
 }
 
-export function ScalpPanel({ performance }: Props) {
+export function ScalpPanel({ performance, latestSignal, microData }: Props) {
   const overall = performance?.overall;
   const venues = performance?.by_venue ?? {};
+  const scalpDirection = latestSignal?.signal ?? "FLAT";
+  const microConfidence = Math.round((latestSignal?.confidence ?? 0) * 100);
 
   return (
     <div className="rounded-lg border border-border bg-card p-4">
@@ -25,6 +29,23 @@ export function ScalpPanel({ performance }: Props) {
           value={`$${(overall?.total_pnl ?? 0).toFixed(2)}`}
           valueClass={(overall?.total_pnl ?? 0) >= 0 ? "text-bullish" : "text-bearish"}
         />
+      </div>
+
+      <div className="mt-3 rounded-md border border-border bg-secondary/20 px-3 py-3">
+        <div className="flex items-center justify-between">
+          <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Latest Scalping Signal</span>
+          <span className={`font-mono text-xs ${scalpDirection === "LONG" ? "text-bullish" : scalpDirection === "SHORT" ? "text-bearish" : "text-muted-foreground"}`}>
+            {scalpDirection}
+          </span>
+        </div>
+        <div className="mt-2 grid grid-cols-3 gap-2">
+          <Metric label="Confidence" value={`${microConfidence}%`} />
+          <Metric label="Move" value={`${((microData?.move_pct_short ?? 0) * 100).toFixed(2)}%`} />
+          <Metric label="Spread" value={`${(microData?.spread_bps ?? 0).toFixed(1)}bp`} />
+        </div>
+        <p className="mt-2 font-mono text-[10px] text-muted-foreground">
+          Volume spike: {microData?.volume_spike ? "yes" : "no"} · Source: {microData?.source_interval ?? "—"}
+        </p>
       </div>
 
       <div className="mt-3 space-y-1.5">

@@ -1,5 +1,6 @@
+import { useState } from "react";
 import { motion } from "framer-motion";
-import { ArrowUpRight, ArrowDownRight, Minus } from "lucide-react";
+import { ArrowUpRight, ArrowDownRight, ChevronDown, ChevronUp, Minus } from "lucide-react";
 import type { Signal } from "@/lib/api";
 
 interface Props {
@@ -9,6 +10,7 @@ interface Props {
 const TF_ORDER = ["1d", "4h", "1h", "15m", "5m"];
 
 export function SignalsPanel({ signals }: Props) {
+  const [expanded, setExpanded] = useState(false);
   // Group by timeframe, pick latest per timeframe
   const byTf = new Map<string, Signal>();
   for (const s of signals) {
@@ -19,17 +21,28 @@ export function SignalsPanel({ signals }: Props) {
   const sorted = TF_ORDER.map((tf) => byTf.get(tf)).filter(Boolean) as Signal[];
 
   return (
-    <div className="rounded-lg border border-border bg-card p-4">
-      <div className="mb-3 flex items-center justify-between">
-        <span className="font-mono text-xs uppercase tracking-widest text-muted-foreground">
+    <div className="rounded-xl border border-border bg-card p-4 shadow-[0_12px_32px_rgba(0,0,0,0.16)]">
+      <div className="flex items-center justify-between gap-3">
+        <span className="font-mono text-[10px] uppercase tracking-[0.28em] text-muted-foreground">
           Multi-Timeframe Signals
         </span>
-        <span className="font-mono text-[10px] text-muted-foreground">
-          {signals.length} total
-        </span>
+        <button
+          type="button"
+          onClick={() => setExpanded((current) => !current)}
+          className="inline-flex items-center gap-1 rounded-full border border-border bg-secondary/30 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground"
+        >
+          {expanded ? "Hide" : "Show"} Details
+          {expanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+        </button>
       </div>
 
-      <div className="space-y-1.5">
+      {!expanded ? (
+        <p className="mt-4 rounded-lg border border-dashed border-border px-4 py-6 text-center font-mono text-xs text-muted-foreground">
+          Signal detail is collapsed by default. Expand when you need timeframe-by-timeframe confirmation.
+        </p>
+      ) : null}
+
+      {expanded ? <div className="mt-4 space-y-1.5">
         {sorted.map((s, i) => {
           const isBull = s.trend === "bullish";
           const isBear = s.trend === "bearish";
@@ -94,7 +107,7 @@ export function SignalsPanel({ signals }: Props) {
             No signals yet
           </p>
         )}
-      </div>
+      </div> : null}
     </div>
   );
 }

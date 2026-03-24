@@ -7,7 +7,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Activity, Bot, BarChart3, Clock, Wallet } from "lucide-react";
+import { Activity, Bot, BarChart3, Clock, Wallet, Stethoscope } from "lucide-react";
 import type { TradingSymbol } from "@/contexts/SymbolContext";
 
 const NAV_ITEMS = [
@@ -16,6 +16,7 @@ const NAV_ITEMS = [
   { to: "/strategy", label: "Strategy", icon: BarChart3 },
   { to: "/history", label: "History", icon: Clock },
   { to: "/wallet", label: "Wallet", icon: Wallet },
+  { to: "/diagnostics", label: "Diagnostics", icon: Stethoscope },
 ];
 
 const SYMBOL_DISPLAY: Record<string, { label: string; short: string }> = {
@@ -29,7 +30,7 @@ export function TopNav() {
   const location = useLocation();
 
   return (
-    <nav className="sticky top-0 z-50 border-b border-border bg-card/80 backdrop-blur-md">
+    <nav className="sticky top-0 z-50 border-b border-border bg-card/85 backdrop-blur-md">
       <div className="mx-auto flex h-12 max-w-7xl items-center gap-1 px-3 sm:px-4 lg:px-6">
         {/* Logo / Brand */}
         <div className="mr-4 flex items-center gap-2">
@@ -68,7 +69,7 @@ export function TopNav() {
 
         {/* Symbol switcher */}
         <Select value={symbol} onValueChange={(v) => setSymbol(v as TradingSymbol)}>
-          <SelectTrigger className="h-8 w-[130px] border-border bg-secondary/50 font-mono text-xs">
+          <SelectTrigger className="h-8 w-[138px] border-border bg-secondary/50 font-mono text-xs">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>

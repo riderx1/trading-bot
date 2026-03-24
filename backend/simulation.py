@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass, asdict
 from datetime import datetime
 
+from strategy_taxonomy import normalize_strategy
+
 
 @dataclass
 class SimPosition:
@@ -60,18 +62,22 @@ class SimulationEngine:
         self.wallet_max_position = float(wallet_cfg.get("max_position_per_trade_usdc", self.wallet_default_balance))
         self.wallet_min_edge = float(wallet_cfg.get("min_edge_for_position", 0.001))
         self.wallet_strategies = [
-            str(name)
+            normalize_strategy(str(name))
             for name in wallet_cfg.get(
                 "strategies",
                 [
-                    "momentum_trend",
+                    "momentum",
                     "ta_confluence",
-                    "reversal_fade",
-                    "arbitrage",
+                    "reversal",
+                    "yes_no",
+                    "cross_venue",
+                    "model_vs_market",
+                    "scalping",
                 ],
             )
             if str(name).strip()
         ]
+        self.default_slippage_bps = float(wallet_cfg.get("slippage_bps", 8.0))
 
         self.positions: list[SimPosition] = []
         self.pair_positions: list[SimPairPosition] = []
@@ -81,7 +87,7 @@ class SimulationEngine:
         self._load_pair_positions()
 
     def _ensure_strategy_wallet(self, strategy: str):
-        key = str(strategy or "ta_confluence")
+        key = normalize_strategy(str(strategy or "ta_confluence"))
         if key not in self.wallets:
             self.wallets[key] = self.wallet_default_balance
 
@@ -91,7 +97,7 @@ class SimulationEngine:
             try:
                 payload = json.loads(state)
                 if isinstance(payload, dict):
-                    self.wallets = {str(k): float(v) for k, v in payload.items()}
+                    self.wallets = {normalize_strategy(str(k)): float(v) for k, v in payload.items()}
                 else:
                     self.wallets = {}
             except (json.JSONDecodeError, TypeError, ValueError):
@@ -310,6 +316,7 @@ class SimulationEngine:
         edge: float,
         risk_factor: float,
     ) -> tuple[float, float]:
+        strategy = normalize_strategy(strategy)
         self._ensure_strategy_wallet(strategy)
         if not self.wallet_enabled:
             notional = max(self.wallet_default_balance, self.wallet_min_notional)
@@ -331,11 +338,19 @@ class SimulationEngine:
         self.wallets[strategy] = max(0.0, available - stake)
         return stake, quantity
 
-    def _close_position(self, position: SimPosition, exit_price: float, exit_ts: str):
+    def apply_slippage(self, price: float, spread_bps: float, side: str) -> float:
+        slip = float(price) * (max(0.0, float(spread_bps)) / 10000.0)
+        if str(side).upper() == "BUY":
+            return float(price) + slip
+        return float(price) - slip
+
+    def _close_position(self, position: SimPosition, exit_price: float, exit_ts: str, spread_bps: float = 0.0):
         entry_dt = datetime.fromisoformat(position.entry_ts)
         exit_dt = datetime.fromisoformat(exit_ts)
         duration_seconds = max(1, int((exit_dt - entry_dt).total_seconds()))
-        pnl = (float(exit_price) - float(position.entry_price)) * float(position.quantity) * int(position.direction)
+        close_side = "SELL" if int(position.direction) > 0 else "BUY"
+        exit_exec_price = self.apply_slippage(float(exit_price), spread_bps, close_side)
+        pnl = (float(exit_exec_price) - float(position.entry_price)) * float(position.quantity) * int(position.direction)
         strategy = str(position.strategy or "ta_confluence")
         self._ensure_strategy_wallet(strategy)
         self.wallets[strategy] = max(0.0, float(self.wallets.get(strategy, 0.0)) + float(position.stake_usdc) + float(pnl))
@@ -343,7 +358,7 @@ class SimulationEngine:
             symbol=position.symbol,
             strategy=position.strategy,
             entry_price=position.entry_price,
-            exit_price=exit_price,
+            exit_price=exit_exec_price,
             direction=position.direction,
             pnl=pnl,
             duration_seconds=duration_seconds,
@@ -381,7 +396,7 @@ class SimulationEngine:
         funding_carry = -int(position.direction) * avg_funding_spread * elapsed_hours * float(position.stake_usdc)
         pnl = spread_pnl + funding_carry
 
-        strategy = str(position.strategy or "perp_arb")
+        strategy = str(position.strategy or "cross_venue")
         self._ensure_strategy_wallet(strategy)
         self.wallets[strategy] = max(
             0.0,
@@ -416,9 +431,12 @@ class SimulationEngine:
         confidence: float = 0.5,
         edge: float = 0.01,
         risk_factor: float = 0.5,
+        max_duration_minutes: int | None = None,
+        spread_bps: float = 0.0,
     ):
         if not self.enabled:
             return
+        strategy = normalize_strategy(strategy)
 
         now_ts = timestamp
         remaining_positions: list[SimPosition] = []
@@ -442,12 +460,15 @@ class SimulationEngine:
             elif current_pnl_pct <= -self.sl_pct:
                 should_close = True
                 close_reason = "stop_loss"
+            elif max_duration_minutes is not None and elapsed_sec >= int(max_duration_minutes) * 60:
+                should_close = True
+                close_reason = "max_duration"
             elif self.time_windows_sec and elapsed_sec >= min(self.time_windows_sec):
                 should_close = True
                 close_reason = "time_window"
 
             if should_close:
-                self._close_position(position, exit_price=entry_price, exit_ts=now_ts)
+                self._close_position(position, exit_price=entry_price, exit_ts=now_ts, spread_bps=spread_bps)
             else:
                 remaining_positions.append(position)
 
@@ -459,9 +480,11 @@ class SimulationEngine:
         )
 
         if direction in (-1, 1) and not existing_open:
+            open_side = "BUY" if int(direction) > 0 else "SELL"
+            entry_exec_price = self.apply_slippage(float(entry_price), spread_bps, open_side)
             stake_usdc, quantity = self._allocate_stake(
                 strategy,
-                float(entry_price),
+                float(entry_exec_price),
                 confidence=confidence,
                 edge=edge,
                 risk_factor=risk_factor,
@@ -477,7 +500,7 @@ class SimulationEngine:
                     strategy=strategy,
                     timeframe=str(timeframe or "consensus"),
                     direction=direction,
-                    entry_price=float(entry_price),
+                    entry_price=float(entry_exec_price),
                     entry_ts=now_ts,
                     quantity=float(quantity),
                     stake_usdc=float(stake_usdc),
@@ -517,6 +540,7 @@ class SimulationEngine:
         """
         if not self.enabled:
             return
+        strategy = normalize_strategy(strategy)
         if not binance_price or not hl_price:
             return
 

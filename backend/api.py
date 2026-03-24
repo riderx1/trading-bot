@@ -102,6 +102,7 @@ def get_status(symbol: str = Query(default="BTCUSDT")):
     target_symbol = (symbol or "BTCUSDT").upper()
     latest_signal = bot.latest_signals.get(target_symbol, {})
     latest_perp_context = bot.latest_perp_context.get(target_symbol, {})
+    latest_micro_data = bot.latest_micro_data.get(target_symbol, {})
     orchestrated = bot.latest_orchestrated_decisions.get(target_symbol, {})
     wallets = bot.simulation.get_wallet_snapshot()
     return {
@@ -118,7 +119,12 @@ def get_status(symbol: str = Query(default="BTCUSDT")):
         "market_focus": bot.polymarket.focus_keywords,
         "latest_signal": latest_signal,
         "latest_perp_context": latest_perp_context,
+        "latest_micro_data": latest_micro_data,
         "orchestrated_decision": orchestrated,
+        "directional_decision": orchestrated.get("directional_decision", {}),
+        "arbitrage_decision": orchestrated.get("arbitrage_decision", {}),
+        "decision_explainability": orchestrated.get("decision_explainability", {}),
+        "latest_scalping_signal": orchestrated.get("latest_scalping_signal"),
         "last_signal_sequence_id": bot.last_signal_sequence_id,
         "last_processed_market_timestamp": bot.last_processed_market_timestamp,
         "uptime_seconds": round(uptime, 1),
@@ -582,6 +588,16 @@ def get_perp_basis_history(
             "symbol": target_symbol,
             "snapshots": rows,
         }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/diagnostics/calibration", summary="Signal calibration diagnostics")
+def get_calibration_diagnostics(
+    window_minutes: int = Query(default=120, ge=5, le=1440, description="Lookback window in minutes"),
+):
+    try:
+        return db.get_calibration_diagnostics(window_minutes=window_minutes)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

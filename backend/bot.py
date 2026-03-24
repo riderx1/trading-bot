@@ -34,6 +34,7 @@ from orchestrator import Orchestrator
 from fair_value_engine import FairValueEngine
 from risk_engine import RiskEngine
 from simulation import SimulationEngine
+from strategy_taxonomy import normalize_strategy, strategy_domain
 from validators import (
     validate_binance_klines_payload,
     validate_binance_price_payload,
@@ -612,11 +613,16 @@ class TradingBot:
         self.long_horizon_conf_multiplier: float = float(trading_cfg.get("long_horizon_conf_multiplier", 0.15))
         self.block_long_horizon_markets: bool = bool(trading_cfg.get("block_long_horizon_markets", True))
         self.max_position_per_trade_usdc: float = float(trading_cfg.get("max_position_per_trade_usdc", self.trade_size))
+        capital_cfg = self.config.get("capital_allocation", {})
+        self.capital_allocation_directional: float = float(capital_cfg.get("directional", 0.7))
+        self.capital_allocation_arbitrage: float = float(capital_cfg.get("arbitrage", 0.3))
+        self.confidence_density_threshold: float = float(trading_cfg.get("confidence_density_threshold", 12.0))
+        self.confidence_density_window_minutes: int = int(trading_cfg.get("confidence_density_window_minutes", 30))
         self.strategies: list[str] = [
-            "momentum_trend",
+            "momentum",
             "ta_confluence",
-            "reversal_fade",
-            "arbitrage",
+            "reversal",
+            "yes_no",
         ]
 
         # Runtime state
@@ -684,6 +690,7 @@ class TradingBot:
         )
         self.orchestrator = Orchestrator(self.db, self.config)
         self.latest_orchestrated_decisions: dict[str, dict] = {}
+        self.latest_micro_data: dict[str, dict] = {}
         fv_cfg = self.config.get("fair_value", {})
         self.fair_value_engine = FairValueEngine(
             model_vs_market_threshold_bp=int(fv_cfg.get("model_vs_market_threshold_bp", 600)),
@@ -777,32 +784,50 @@ class TradingBot:
         regime: str,
         reason_code: str | None = None,
         edge: float | None = None,
+        micro_data: dict | None = None,
     ) -> str:
+        if self._is_scalping_setup(micro_data):
+            return "scalping"
         if reason_code and "arb" in reason_code:
-            return "arbitrage"
+            return "yes_no"
         if edge is not None and edge >= max(self.min_edge, 0.01):
-            return "arbitrage"
+            return "yes_no"
         if regime == "REVERSAL":
-            return "reversal_fade"
+            return "reversal"
         if confidence >= self.strong_signal_floor and trend in {"bullish", "bearish"}:
-            return "momentum_trend"
+            return "momentum"
         return "ta_confluence"
 
     def _strategy_score_map(self) -> dict[str, float]:
         rankings = self.db.get_strategy_rankings()
         if not rankings:
             return {
-                "momentum_trend": 0.0,
+                "momentum": 0.0,
                 "ta_confluence": 0.0,
-                "reversal_fade": 0.0,
-                "arbitrage": 0.0,
+                "reversal": 0.0,
+                "yes_no": 0.0,
+                "model_vs_market": 0.0,
+                "cross_venue": 0.0,
+                "scalping": 0.0,
             }
         return {
-            str(row.get("strategy") or ""): float(row.get("score") or 0.0)
+            normalize_strategy(str(row.get("strategy") or "")): float(row.get("score") or 0.0)
             for row in rankings
         }
 
+    def _apply_signal_scarcity(self, confidence: float, strategy: str, symbol: str) -> float:
+        recent_signals = self.db.get_signal_density(
+            window_minutes=self.confidence_density_window_minutes,
+            symbol=symbol,
+            strategy=normalize_strategy(strategy),
+        )
+        threshold = max(1.0, float(self.confidence_density_threshold))
+        signal_density = recent_signals / threshold
+        scarcity_factor = 1.0 / (1.0 + signal_density)
+        return max(0.0, min(0.75, float(confidence) * scarcity_factor))
+
     def _apply_strategy_confidence_adjustment(self, confidence: float, strategy: str) -> float:
+        strategy = normalize_strategy(strategy)
         scores = self._strategy_score_map()
         if not scores:
             return max(0.0, min(self.confidence_cap, confidence))
@@ -893,11 +918,33 @@ class TradingBot:
         return 0.35
 
     def _position_size_usdc(self, strategy: str, confidence: float, edge: float, risk_factor: float) -> float:
+        strategy = normalize_strategy(strategy)
         wallets = self.simulation.get_wallet_snapshot().get("bots", {})
         wallet_row = wallets.get(strategy, {})
         wallet_equity = float(wallet_row.get("equity_usdc") or self.trade_size)
         size = wallet_equity * max(0.0, min(self.confidence_cap, confidence)) * max(0.0, min(0.10, edge)) * max(0.05, min(1.0, risk_factor))
-        return max(0.0, min(self.max_position_per_trade_usdc, size))
+        if strategy_domain(strategy) == "arbitrage":
+            size *= max(0.0, min(1.0, self.capital_allocation_arbitrage))
+        else:
+            size *= max(0.0, min(1.0, self.capital_allocation_directional))
+        max_position = self.max_position_per_trade_usdc * (0.3 if strategy == "scalping" else 1.0)
+        return max(0.0, min(max_position, size))
+
+    def _strategy_min_edge(self, strategy: str) -> float:
+        if strategy == "scalping":
+            return 0.003
+        return self.min_edge
+
+    def _is_scalping_setup(self, micro_data: dict | None) -> bool:
+        if not isinstance(micro_data, dict):
+            return False
+        move_pct = float(micro_data.get("move_pct_short") or 0.0)
+        spread_bps = float(micro_data.get("spread_bps") or 0.0)
+        if spread_bps > 15.0:
+            return False
+        if not bool(micro_data.get("volume_spike")):
+            return False
+        return abs(move_pct) >= 0.001
 
     def _infer_ta_direction(self, hits: list[str]) -> str:
         bullish_markers = ("bullish", "oversold", "band walk upper")
@@ -1098,6 +1145,7 @@ class TradingBot:
             symbol=active_symbol,
         )
         regime = self._infer_regime(signals_by_interval)
+        micro_data = self._build_micro_data(active_symbol)
 
         return {
             "source": "binance",
@@ -1109,6 +1157,48 @@ class TradingBot:
             "value": price,
             "timestamp": timestamp,
             "timeframes": signals_by_interval,
+            "micro_data": micro_data,
+        }
+
+    def _build_micro_data(self, symbol: str | None = None) -> dict:
+        active_symbol = symbol or self.binance.symbol
+        client = self._binance_clients.get(active_symbol, self.binance)
+        candles_1m = client.get_klines(interval="1m", limit=20)
+        candles_5m = client.get_klines(interval="5m", limit=8)
+        source = candles_1m[:-1] if len(candles_1m) >= 6 else candles_5m[:-1]
+
+        if len(source) < 4:
+            return {
+                "symbol": active_symbol,
+                "time_horizon": "scalp",
+                "move_pct_short": 0.0,
+                "volume_spike": False,
+                "volume_ratio": 0.0,
+                "spread_bps": 999.0,
+                "source_interval": "1m" if len(candles_1m) >= 6 else "5m",
+            }
+
+        recent = source[-3:]
+        start_price = float(recent[0]["open"] or 0.0)
+        end_price = float(recent[-1]["close"] or 0.0)
+        move_pct_short = ((end_price - start_price) / start_price) if start_price > 0 else 0.0
+        latest_volume = float(recent[-1]["volume"] or 0.0)
+        avg_volume = sum(float(candle["volume"] or 0.0) for candle in source[-10:]) / max(min(len(source), 10), 1)
+        volume_ratio = (latest_volume / avg_volume) if avg_volume > 0 else 0.0
+        volume_spike = volume_ratio >= 1.8
+        latest_close = float(recent[-1]["close"] or 0.0)
+        latest_high = float(recent[-1]["high"] or latest_close)
+        latest_low = float(recent[-1]["low"] or latest_close)
+        spread_bps = ((latest_high - latest_low) / latest_close) * 10000.0 if latest_close > 0 else 999.0
+
+        return {
+            "symbol": active_symbol,
+            "time_horizon": "scalp",
+            "move_pct_short": move_pct_short,
+            "volume_spike": volume_spike,
+            "volume_ratio": volume_ratio,
+            "spread_bps": spread_bps,
+            "source_interval": "1m" if len(candles_1m) >= 6 else "5m",
         }
 
     def _persist_signal_snapshot(self, signal_snapshot: dict, symbol: str | None = None):
@@ -1119,7 +1209,10 @@ class TradingBot:
             trend=str(signal_snapshot.get("trend") or "neutral"),
             confidence=float(signal_snapshot.get("confidence") or 0.0),
             regime=regime,
+            micro_data=signal_snapshot.get("micro_data"),
         )
+        strategy = normalize_strategy(strategy)
+        self.latest_micro_data[active_symbol] = dict(signal_snapshot.get("micro_data") or {})
 
         has_htf_conflict = "conflicts=" in str(signal_snapshot.get("reasoning") or "") and "none" not in str(signal_snapshot.get("reasoning") or "")
         ta_disagreement = "ta=conflict" in str(signal_snapshot.get("reasoning") or "")
@@ -1140,6 +1233,11 @@ class TradingBot:
         adjusted_confidence = self._apply_strategy_confidence_adjustment(
             normalized_confidence,
             strategy,
+        )
+        adjusted_confidence = self._apply_signal_scarcity(
+            adjusted_confidence,
+            strategy,
+            active_symbol,
         )
         signal_snapshot["base_confidence"] = float(signal_snapshot.get("confidence") or 0.0)
         signal_snapshot["confidence"] = adjusted_confidence
@@ -1191,6 +1289,8 @@ class TradingBot:
                 str(signal_snapshot.get("signal_strength") or "weak"),
                 float(signal_snapshot.get("confidence") or 0.0),
             ),
+            max_duration_minutes=15 if strategy == "scalping" else None,
+            spread_bps=float((signal_snapshot.get("micro_data") or {}).get("spread_bps") or 0.0),
         )
 
         orchestrated = self.orchestrator.output_decision(
@@ -1198,6 +1298,7 @@ class TradingBot:
             signal_snapshot,
             ta_alignment=0.0,
             market_summary=None,
+            micro_data=signal_snapshot.get("micro_data"),
         )
         self.latest_orchestrated_decisions[active_symbol] = orchestrated
         self.db.set_bot_state(
@@ -1210,7 +1311,7 @@ class TradingBot:
         if signal_snapshot is not None and not context:
             inferred_symbol = str(signal_snapshot.get("symbol") or self.binance.symbol)
             inferred_timeframe = str(signal_snapshot.get("timeframe") or "consensus")
-            inferred_strategy = str(signal_snapshot.get("strategy") or "ta_confluence")
+            inferred_strategy = normalize_strategy(str(signal_snapshot.get("strategy") or "ta_confluence"))
             inferred_strength = str(signal_snapshot.get("signal_strength") or "weak")
             inferred_regime = str(signal_snapshot.get("regime") or "CHOP")
             return self.db.get_historical_win_rate(
@@ -1225,7 +1326,7 @@ class TradingBot:
         return self.db.get_historical_win_rate(
             symbol=str(context.get("symbol") or self.binance.symbol),
             timeframe=str(context.get("timeframe") or "consensus"),
-            strategy=str(context.get("strategy") or "ta_confluence"),
+            strategy=normalize_strategy(str(context.get("strategy") or "ta_confluence")),
             signal_strength=str(context.get("signal_strength") or "weak"),
             regime=str(context.get("regime") or "CHOP"),
             min_samples=self.low_sample_threshold,
@@ -1256,6 +1357,7 @@ class TradingBot:
                 "confidence": 1.0,
                 "signal_strength": "strong",
                 "timestamp": datetime.utcnow().isoformat(),
+                "strategy": "yes_no",
             }
             reasoning = (
                 f"combined={combined:.4f} below arb_threshold={self.arb_threshold:.4f}; "
@@ -1271,7 +1373,7 @@ class TradingBot:
                     timeframe="consensus",
                     reasoning=reasoning,
                     symbol=active_symbol,
-                    strategy="arbitrage",
+                    strategy="yes_no",
                 )
                 self._record_signal_opportunity(
                     market,
@@ -1281,7 +1383,7 @@ class TradingBot:
                     timeframe="consensus",
                     reasoning=reasoning,
                     symbol=active_symbol,
-                    strategy="arbitrage",
+                    strategy="yes_no",
                 )
                 return
             self._execute_trade(market_id, market, "YES", signal_snapshot)
@@ -1356,9 +1458,11 @@ class TradingBot:
                 "best_edge": abs(result.edge_bp) / 10_000.0,
                 "best_side": "YES" if result.edge_bp > 0 else "NO",
                 "arb_type": result.arb_type,
+                "market_name": str(market.get("market_name") or ""),
             },
             fv_result=result,
             perp_context=perp_context,
+            micro_data=signal_snapshot.get("micro_data"),
         )
         self.latest_orchestrated_decisions[active_symbol] = orchestrated
         self.db.set_bot_state(
@@ -1382,7 +1486,7 @@ class TradingBot:
             p_fair=result.p_fair,
             p_mkt=result.p_mkt,
             edge_bp=result.edge_bp,
-            strategy="model_vs_market" if result.arb_type == "model_vs_market" else "arbitrage",
+            strategy="model_vs_market" if result.arb_type == "model_vs_market" else "yes_no",
             why=result.why,
             symbol=active_symbol,
             signal_sequence_id=int(
@@ -1441,7 +1545,9 @@ class TradingBot:
             confidence=float(signal_snapshot.get("confidence") or 0.0),
             regime=str(signal_snapshot.get("regime") or "CHOP"),
             reason_code=reason_code,
+            micro_data=signal_snapshot.get("micro_data"),
         )
+        active_strategy = normalize_strategy(active_strategy)
         yes_price = float(market.get("yes_price") or 0.0)
         no_price = float(market.get("no_price") or 0.0)
         combined_price = yes_price + no_price
@@ -1481,10 +1587,12 @@ class TradingBot:
         )
         confidence = max(0.0, min(self.confidence_cap, confidence * horizon_multiplier))
         confidence = self._apply_strategy_confidence_adjustment(confidence, active_strategy)
+        confidence = self._apply_signal_scarcity(confidence, active_strategy, active_symbol)
 
-        if edge <= self.min_edge:
+        min_edge = self._strategy_min_edge(active_strategy)
+        if edge <= min_edge:
             self._log(
-                f"[SIGNAL_SKIP] {market.get('market_name', 'unknown')} {side} tf={timeframe} edge={edge:.4f} <= min_edge={self.min_edge:.4f} reason={reason_code}",
+                f"[SIGNAL_SKIP] {market.get('market_name', 'unknown')} {side} tf={timeframe} edge={edge:.4f} <= min_edge={min_edge:.4f} reason={reason_code}",
                 level="INFO",
             )
             return
@@ -1585,6 +1693,8 @@ class TradingBot:
                     "timestamp": signal_snapshot.get("timestamp"),
                     "reasoning": signal_snapshot.get("reasoning", ""),
                     "regime": signal_snapshot.get("regime", "CHOP"),
+                    "micro_data": signal_snapshot.get("micro_data") or {},
+                    "strategy": signal_snapshot.get("strategy"),
                 }
                 self._record_signal_opportunity(
                     market,
@@ -1599,6 +1709,7 @@ class TradingBot:
                         confidence=float(local_signal_snapshot.get("confidence") or 0.0),
                         regime=str(signal_snapshot.get("regime") or "CHOP"),
                         reason_code=f"trend_bullish_yes_{market_timeframe}",
+                        micro_data=local_signal_snapshot.get("micro_data"),
                     ),
                 )
             else:
@@ -1622,6 +1733,8 @@ class TradingBot:
                     "timestamp": signal_snapshot.get("timestamp"),
                     "reasoning": signal_snapshot.get("reasoning", ""),
                     "regime": signal_snapshot.get("regime", "CHOP"),
+                    "micro_data": signal_snapshot.get("micro_data") or {},
+                    "strategy": signal_snapshot.get("strategy"),
                 }
                 self._record_signal_opportunity(
                     market,
@@ -1636,6 +1749,7 @@ class TradingBot:
                         confidence=float(local_signal_snapshot.get("confidence") or 0.0),
                         regime=str(signal_snapshot.get("regime") or "CHOP"),
                         reason_code=f"trend_bearish_no_{market_timeframe}",
+                        micro_data=local_signal_snapshot.get("micro_data"),
                     ),
                 )
             else:
@@ -1659,9 +1773,27 @@ class TradingBot:
         In live mode:
           - TODO: integrate Polymarket CLOB API order submission here.
         """
-        strategy = str(signal_snapshot.get("strategy") or "ta_confluence")
+        strategy = normalize_strategy(str(signal_snapshot.get("strategy") or "ta_confluence"))
         signal_strength = str(signal_snapshot.get("signal_strength") or "weak")
         confidence = float(signal_snapshot.get("confidence") or 0.0)
+        micro_data = signal_snapshot.get("micro_data") or {}
+
+        if strategy == "scalping":
+            spread_bps = float(micro_data.get("spread_bps") or 0.0)
+            volume_spike = bool(micro_data.get("volume_spike"))
+            if spread_bps > 15.0:
+                self._log(
+                    f"Trade blocked: scalping spread_too_high={spread_bps:.2f}bp market_id={market.get('market_id')}",
+                    level="INFO",
+                )
+                return
+            if not volume_spike:
+                self._log(
+                    f"Trade blocked: scalping requires volume_spike market_id={market.get('market_id')}",
+                    level="INFO",
+                )
+                return
+
         side_market_price = float(market.get("yes_price") if trade_type == "YES" else market.get("no_price") or 0.0)
         regime = str(signal_snapshot.get("regime") or "CHOP")
         timeframe = self._detect_market_timeframe(market.get("market_name", "")) or "1d"
@@ -1675,6 +1807,11 @@ class TradingBot:
         expected_yes = float(expected_stats.get("win_rate") or 0.5)
         expected_side = expected_yes if trade_type == "YES" else (1.0 - expected_yes)
         edge = self._edge_from_context(expected_side, side_market_price)
+        confidence = self._apply_signal_scarcity(
+            confidence,
+            strategy,
+            self._symbol_for_market(market.get("market_name", "")),
+        )
         risk_factor = self._risk_factor_for_setup(signal_strength, confidence)
         trade_notional = self._position_size_usdc(strategy, confidence, edge, risk_factor)
         if trade_notional <= 0:
@@ -1890,7 +2027,7 @@ class TradingBot:
 
                         self.simulation.on_pair_signal(
                             symbol=symbol,
-                            strategy="perp_arb",
+                            strategy="cross_venue",
                             direction=pair_direction,
                             binance_price=float(bin_perp),
                             hl_price=float(hl_perp),
@@ -1920,7 +2057,7 @@ class TradingBot:
                                     p_fair=None,
                                     p_mkt=None,
                                     edge_bp=int(round(bp)),
-                                    strategy="perp_arb",
+                                    strategy="cross_venue",
                                     why=(
                                         f"Binance perp={bin_perp:.2f} HL perp={hl_perp:.2f} "
                                         f"basis={bp:.1f}bp fund_spread={funding_spread:.6f}"

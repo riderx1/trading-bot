@@ -119,10 +119,46 @@ export function useScalpPerformance() {
   });
 }
 
+export function useCalibrationDiagnostics(windowMinutes = 120) {
+  return useQuery({
+    queryKey: ["calibration-diagnostics", windowMinutes],
+    queryFn: () => api.getCalibrationDiagnostics(windowMinutes),
+    refetchInterval: 30000,
+    retry: 2,
+  });
+}
+
 export function useLogs(limit = 50) {
   return useQuery({
     queryKey: ["logs", limit],
     queryFn: () => api.getLogs(limit),
+    refetchInterval: 30000,
+    retry: 2,
+  });
+}
+
+export function useHistorySignals(params: Record<string, string>) {
+  return useQuery({
+    queryKey: ["history-signals", params],
+    queryFn: () => api.getHistorySignals(params),
+    refetchInterval: 30000,
+    retry: 2,
+  });
+}
+
+export function useHistoryOpportunities(params: Record<string, string>) {
+  return useQuery({
+    queryKey: ["history-opportunities", params],
+    queryFn: () => api.getHistoryOpportunities(params),
+    refetchInterval: 30000,
+    retry: 2,
+  });
+}
+
+export function useHistoryTrades(params: Record<string, string>) {
+  return useQuery({
+    queryKey: ["history-trades", params],
+    queryFn: () => api.getHistoryTrades(params),
     refetchInterval: 30000,
     retry: 2,
   });

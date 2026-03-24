@@ -12,6 +12,7 @@ export function SystemStatus({ status, isLoading, isError }: Props) {
   const hours = Math.floor(uptime / 3600);
   const mins = Math.floor((uptime % 3600) / 60);
   const isPaperOnly = (status?.paper_trading_only ?? false) || (status?.execution_mode === "paper");
+  const lastUpdated = status?.latest_signal?.timestamp ?? null;
 
   const threads = [
     { label: "Binance", alive: status?.binance_thread_alive },
@@ -21,7 +22,7 @@ export function SystemStatus({ status, isLoading, isError }: Props) {
   ];
 
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border bg-card px-4 py-2">
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-xl border border-border bg-card px-4 py-2.5 shadow-[0_8px_24px_rgba(0,0,0,0.15)]">
       {/* Connection status */}
       <div className="flex items-center gap-1.5">
         <Circle
@@ -39,6 +40,25 @@ export function SystemStatus({ status, isLoading, isError }: Props) {
         <Clock className="h-3 w-3 text-muted-foreground" />
         <span className="font-mono text-[10px] text-muted-foreground">
           {hours}h {mins}m
+        </span>
+      </div>
+
+      <div className="flex items-center gap-1">
+        <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Auto</span>
+        <span className="font-mono text-[10px] text-foreground">5s</span>
+      </div>
+
+      <div className="flex items-center gap-1">
+        <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Updated</span>
+        <span className="font-mono text-[10px] text-foreground">
+          {lastUpdated
+            ? new Date(lastUpdated).toLocaleTimeString("en-US", {
+                hour12: false,
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+              })
+            : "--:--:--"}
         </span>
       </div>
 
@@ -66,6 +86,7 @@ export function SystemStatus({ status, isLoading, isError }: Props) {
           >
             {isPaperOnly ? "PAPER TRADING ONLY" : "MODE CHECK"}
           </span>
+          <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted-foreground">Symbol</span>
           <span className="font-mono text-[10px] font-medium text-foreground">
             {status.symbol}
           </span>

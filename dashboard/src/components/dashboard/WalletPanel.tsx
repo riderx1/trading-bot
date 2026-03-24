@@ -7,21 +7,23 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
 const STRATEGY_COLORS: Record<string, string> = {
-  momentum_trend: "hsl(142, 60%, 45%)",
+  momentum: "hsl(142, 60%, 45%)",
   ta_confluence: "hsl(200, 70%, 50%)",
-  reversal_fade: "hsl(280, 60%, 55%)",
-  arbitrage: "hsl(45, 90%, 55%)",
+  reversal: "hsl(280, 60%, 55%)",
+  yes_no: "hsl(45, 90%, 55%)",
   model_vs_market: "hsl(280, 60%, 65%)",
-  perp_arb: "hsl(210, 75%, 60%)",
+  cross_venue: "hsl(210, 75%, 60%)",
+  scalping: "hsl(18, 90%, 58%)",
 };
 
 const STRATEGY_LABELS: Record<string, string> = {
-  momentum_trend: "Momentum",
+  momentum: "Momentum",
   ta_confluence: "TA",
-  reversal_fade: "Reversal",
-  arbitrage: "Arbitrage",
+  reversal: "Reversal",
+  yes_no: "Yes/No Arb",
   model_vs_market: "Model/FV",
-  perp_arb: "Perp Arb",
+  cross_venue: "Cross Venue",
+  scalping: "Scalping",
 };
 
 interface Props {

@@ -52,11 +52,14 @@ export interface WalletSnapshot {
 export interface BotDecision {
   bot?: string;
   strategy: string;
+  type?: "directional" | "arbitrage";
+  time_horizon?: "scalp" | "short" | "medium" | "long";
   direction: number;
   confidence: number;
   reasoning: string;
   signal?: string;
   weight?: number;
+  edge?: number;
 }
 
 export interface OrchestratedDecision {
@@ -67,6 +70,40 @@ export interface OrchestratedDecision {
   reasoning: string;
   timestamp?: string;
   bots: Record<string, BotDecision>;
+}
+
+export interface DirectionalDecision {
+  bias: "LONG" | "SHORT" | "NO TRADE";
+  confidence: number;
+  conviction: "HIGH" | "MEDIUM" | "LOW";
+  setup_quality: "READY" | "DEVELOPING" | "POOR";
+  entry_timing: "EARLY" | "CONFIRMED" | "LATE";
+  top_strategy: string;
+  top_bot: string;
+  time_horizon: "scalp" | "short" | "medium" | "long";
+  weighted_bias: number;
+  reasoning: string;
+  bots: BotDecision[];
+}
+
+export interface ArbitrageDecision {
+  active: boolean;
+  type: string;
+  edge: number;
+  market: string;
+  confidence: number;
+  execution_note: string;
+  bots: BotDecision[];
+}
+
+export interface MicroData {
+  symbol: string;
+  time_horizon: string;
+  move_pct_short: number;
+  volume_spike: boolean;
+  volume_ratio: number;
+  spread_bps: number;
+  source_interval: string;
 }
 
 export interface StatusResponse {
@@ -81,7 +118,15 @@ export interface StatusResponse {
   signal_intervals: string[];
   latest_signal: Signal | null;
   latest_perp_context?: Record<string, unknown> | null;
+  latest_micro_data?: MicroData | null;
   orchestrated_decision: OrchestratedDecision | null;
+  directional_decision?: DirectionalDecision | null;
+  arbitrage_decision?: ArbitrageDecision | null;
+  decision_explainability?: {
+    why_long: string[];
+    why_not_stronger: string[];
+  } | null;
+  latest_scalping_signal?: BotDecision | null;
   last_signal_sequence_id: number | null;
   uptime_seconds: number;
   binance_thread_alive: boolean;
@@ -182,6 +227,16 @@ export interface ScalpPerformanceResponse {
   by_venue: Record<string, ScalpAggregate>;
   by_asset: Record<string, ScalpAggregate>;
   as_of: string;
+}
+
+export interface CalibrationDiagnosticsResponse {
+  confidence_distribution: Record<string, number>;
+  edge_distribution: Record<string, number>;
+  signal_density: {
+    window_minutes: number;
+    total_signals: number;
+    by_strategy: Record<string, number>;
+  };
 }
 
 export interface SimulatedTrade {
@@ -285,6 +340,70 @@ function normalizeDecision(raw: any): OrchestratedDecision | null {
   };
 }
 
+function normalizeBotDecision(raw: any): BotDecision {
+  return {
+    bot: String(raw?.bot || raw?.strategy || "UnknownBot"),
+    strategy: String(raw?.strategy || "unknown"),
+    type: raw?.type === "arbitrage" ? "arbitrage" : "directional",
+    time_horizon: String(raw?.time_horizon || "short") as BotDecision["time_horizon"],
+    direction: Number(raw?.direction || 0),
+    confidence: Number(raw?.confidence || 0),
+    reasoning: String(raw?.reasoning || ""),
+    signal: String(raw?.signal || "FLAT"),
+    weight: Number(raw?.weight || 0),
+    edge: Number(raw?.edge || 0),
+  };
+}
+
+function normalizeDirectionalDecision(raw: any, fallback: OrchestratedDecision | null): DirectionalDecision | null {
+  if (raw && typeof raw === "object") {
+    return {
+      bias: raw.bias === "LONG" || raw.bias === "SHORT" ? raw.bias : "NO TRADE",
+      confidence: Number(raw.confidence || 0),
+      conviction: raw.conviction === "HIGH" || raw.conviction === "MEDIUM" ? raw.conviction : "LOW",
+      setup_quality: raw.setup_quality === "READY" || raw.setup_quality === "DEVELOPING" ? raw.setup_quality : "POOR",
+      entry_timing: raw.entry_timing === "EARLY" || raw.entry_timing === "LATE" ? raw.entry_timing : "CONFIRMED",
+      top_strategy: String(raw.top_strategy || "ta_confluence"),
+      top_bot: String(raw.top_bot || ""),
+      time_horizon: String(raw.time_horizon || "short") as DirectionalDecision["time_horizon"],
+      weighted_bias: Number(raw.weighted_bias || 0),
+      reasoning: String(raw.reasoning || ""),
+      bots: Array.isArray(raw.bots) ? raw.bots.map(normalizeBotDecision) : [],
+    };
+  }
+
+  if (!fallback) return null;
+  const botRows = Object.values(fallback.bots);
+  const bias = fallback.direction > 0 ? "LONG" : fallback.direction < 0 ? "SHORT" : "NO TRADE";
+  const confidence = Number(fallback.confidence || 0);
+  return {
+    bias,
+    confidence,
+    conviction: confidence >= 0.65 ? "HIGH" : confidence >= 0.45 ? "MEDIUM" : "LOW",
+    setup_quality: confidence >= 0.6 ? "READY" : confidence >= 0.35 ? "DEVELOPING" : "POOR",
+    entry_timing: confidence < 0.35 ? "EARLY" : Math.abs(fallback.direction) > 0 ? "CONFIRMED" : "LATE",
+    top_strategy: botRows[0]?.strategy || "ta_confluence",
+    top_bot: botRows[0]?.bot || "",
+    time_horizon: (botRows[0]?.time_horizon as DirectionalDecision["time_horizon"]) || "short",
+    weighted_bias: Number(fallback.direction || 0),
+    reasoning: fallback.reasoning,
+    bots: botRows,
+  };
+}
+
+function normalizeArbitrageDecision(raw: any): ArbitrageDecision | null {
+  if (!raw || typeof raw !== "object") return null;
+  return {
+    active: Boolean(raw.active),
+    type: String(raw.type || "none"),
+    edge: Number(raw.edge || 0),
+    market: String(raw.market || ""),
+    confidence: Number(raw.confidence || 0),
+    execution_note: String(raw.execution_note || "No active arbitrage edge"),
+    bots: Array.isArray(raw.bots) ? raw.bots.map(normalizeBotDecision) : [],
+  };
+}
+
 function normalizeRankings(raw: any): { strategies: StrategyRanking[] } {
   const rows = Array.isArray(raw?.strategies)
     ? raw.strategies
@@ -309,12 +428,27 @@ function normalizeRankings(raw: any): { strategies: StrategyRanking[] } {
 export const api = {
   getStatus: async (symbol?: string) => {
     const raw = await fetchJson<any>("/status", symbol ? { symbol } : undefined);
+    const normalizedLegacy = normalizeDecision(raw.orchestrated_decision);
     return {
       ...raw,
       latest_signal: raw.latest_signal ?? null,
-      orchestrated_decision: normalizeDecision(raw.orchestrated_decision),
+      latest_micro_data: raw.latest_micro_data ?? null,
+      orchestrated_decision: normalizedLegacy,
+      directional_decision: normalizeDirectionalDecision(raw.directional_decision, normalizedLegacy),
+      arbitrage_decision: normalizeArbitrageDecision(raw.arbitrage_decision),
+      decision_explainability: raw.decision_explainability ?? null,
+      latest_scalping_signal: raw.latest_scalping_signal ? normalizeBotDecision(raw.latest_scalping_signal) : null,
     } as StatusResponse;
   },
+
+  getHistorySignals: (params?: Record<string, string>) =>
+    fetchJson<{ signals: Signal[] }>("/history/signals", params),
+
+  getHistoryOpportunities: (params?: Record<string, string>) =>
+    fetchJson<{ opportunities: Opportunity[] }>("/history/opportunities", params),
+
+  getHistoryTrades: (params?: Record<string, string>) =>
+    fetchJson<{ trades: SimulatedTrade[] }>("/history/trades", params),
 
   getSignals: (limit = 20, symbol?: string) =>
     fetchJson<{ signals: Signal[] }>("/signals", { limit: String(limit), ...(symbol ? { symbol } : {}) }),
@@ -378,6 +512,11 @@ export const api = {
 
   getScalpPerformance: () =>
     fetchJson<ScalpPerformanceResponse>("/scalp/performance"),
+
+  getCalibrationDiagnostics: (windowMinutes = 120) =>
+    fetchJson<CalibrationDiagnosticsResponse>("/diagnostics/calibration", {
+      window_minutes: String(windowMinutes),
+    }),
 
   getLogs: (limit = 50) =>
     fetchJson<{ logs: LogEntry[] }>("/logs", { limit: String(limit) }),
