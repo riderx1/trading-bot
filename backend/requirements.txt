@@ -1,0 +1,15 @@
+# ── Web framework ──────────────────────────────────────────────────────────────
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0     # ASGI server with WebSocket + HTTP/2 support
+
+# ── HTTP client ────────────────────────────────────────────────────────────────
+requests>=2.31.0               # Polymarket + Binance REST calls
+
+# ── Utilities ──────────────────────────────────────────────────────────────────
+python-dotenv>=1.0.0           # Optional: load .env file for secrets
+
+# ── Technical scanner ──────────────────────────────────────────────────────────
+ccxt>=4.4.0
+pandas>=2.2.0
+pandas-ta>=0.3.14b0; python_version < "3.14"
+numpy>=1.26.0

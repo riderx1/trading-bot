@@ -1,0 +1,129 @@
+import { useQuery } from "@tanstack/react-query";
+import { api } from "@/lib/api";
+
+export function useStatus(symbol?: string) {
+  return useQuery({
+    queryKey: ["status", symbol],
+    queryFn: () => api.getStatus(symbol),
+    refetchInterval: 5000,
+    retry: 2,
+  });
+}
+
+export function useSignals(limit = 20) {
+  return useSignalsForSymbol(undefined, limit);
+}
+
+export function useSignalsForSymbol(symbol?: string, limit = 20) {
+  return useQuery({
+    queryKey: ["signals", symbol, limit],
+    queryFn: () => api.getSignals(limit, symbol),
+    refetchInterval: 15000,
+    retry: 2,
+  });
+}
+
+export function useOpportunities(symbol?: string, limit = 12) {
+  return useQuery({
+    queryKey: ["opportunities", symbol, limit],
+    queryFn: () => api.getOpportunities(limit, symbol),
+    refetchInterval: 15000,
+    retry: 2,
+  });
+}
+
+export function useArbitrageOpportunities(
+  symbol?: string,
+  arbType = "ALL",
+  status = "open",
+  limit = 12,
+  offset = 0,
+) {
+  return useQuery({
+    queryKey: ["arb-opportunities", symbol, arbType, status, limit, offset],
+    queryFn: () => api.getArbitrageOpportunities(limit, symbol, arbType, status, offset),
+    refetchInterval: 30000,
+    retry: 2,
+  });
+}
+
+export function usePerpBasisLatest(symbol?: string) {
+  return useQuery({
+    queryKey: ["perp-basis-latest", symbol],
+    queryFn: () => api.getPerpBasisLatest(symbol),
+    refetchInterval: 15000,
+    retry: 2,
+  });
+}
+
+export function usePerpBasisHistory(symbol?: string, limit = 20) {
+  return useQuery({
+    queryKey: ["perp-basis-history", symbol, limit],
+    queryFn: () => api.getPerpBasisHistory(symbol, limit),
+    refetchInterval: 30000,
+    retry: 2,
+  });
+}
+
+export function useWallets() {
+  return useQuery({
+    queryKey: ["wallets"],
+    queryFn: () => api.getWallets(),
+    refetchInterval: 5000,
+    retry: 2,
+  });
+}
+
+export function usePerformance() {
+  return useQuery({
+    queryKey: ["performance"],
+    queryFn: () => api.getPerformance(),
+    refetchInterval: 30000,
+    retry: 2,
+  });
+}
+
+export function useStrategyRankings() {
+  return useQuery({
+    queryKey: ["rankings"],
+    queryFn: () => api.getStrategyRankings(),
+    refetchInterval: 30000,
+    retry: 2,
+  });
+}
+
+export function useActivePaperTrades(symbol?: string) {
+  return useQuery({
+    queryKey: ["active-paper-trades", symbol],
+    queryFn: () => api.getActivePaperTrades(symbol),
+    refetchInterval: 5000,
+    retry: 2,
+  });
+}
+
+export function useRecentTrades(symbol?: string, limit = 25) {
+  return useQuery({
+    queryKey: ["recent-trades", symbol, limit],
+    queryFn: () => api.getRecentTrades(limit, symbol),
+    refetchInterval: 10000,
+    retry: 2,
+  });
+}
+
+export function useScalpPerformance() {
+  return useQuery({
+    queryKey: ["scalp-performance"],
+    queryFn: () => api.getScalpPerformance(),
+    refetchInterval: 15000,
+    retry: 2,
+  });
+}
+
+export function useLogs(limit = 50) {
+  return useQuery({
+    queryKey: ["logs", limit],
+    queryFn: () => api.getLogs(limit),
+    refetchInterval: 30000,
+    retry: 2,
+  });
+}
